@@ -40,6 +40,12 @@ class TestParseTargetPlatformChat:
         target = DeliveryTarget.parse("unknown_platform")
         assert target.platform == Platform.LOCAL
 
+    def test_explicit_chat_id_preserves_case(self):
+        target = DeliveryTarget.parse("weixin:o9cq80_NCg2MSENrDNoIYg_tPmCs@im.wechat")
+        assert target.platform == Platform.WEIXIN
+        assert target.chat_id == "o9cq80_NCg2MSENrDNoIYg_tPmCs@im.wechat"
+        assert target.is_explicit is True
+
 
 class TestTargetToStringRoundtrip:
     def test_origin_roundtrip(self):

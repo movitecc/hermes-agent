@@ -814,7 +814,10 @@ class SessionStore:
         with self._lock:
             self._ensure_loaded_locked()
             for entry in self._entries.values():
-                if not entry.suspended and entry.updated_at >= cutoff:
+                updated_at = entry.updated_at
+                if isinstance(updated_at, (int, float)):
+                    updated_at = datetime.fromtimestamp(updated_at)
+                if not entry.suspended and updated_at >= cutoff:
                     entry.suspended = True
                     count += 1
             if count:

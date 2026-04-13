@@ -53,9 +53,10 @@ class DeliveryTarget:
         - "telegram" → Telegram home channel
         - "telegram:123456" → specific Telegram chat
         """
-        target = target.strip().lower()
+        raw_target = target.strip()
+        lowered_target = raw_target.lower()
         
-        if target == "origin":
+        if lowered_target == "origin":
             if origin:
                 return cls(
                     platform=origin.platform,
@@ -67,13 +68,13 @@ class DeliveryTarget:
                 # Fallback to local if no origin
                 return cls(platform=Platform.LOCAL, is_origin=True)
         
-        if target == "local":
+        if lowered_target == "local":
             return cls(platform=Platform.LOCAL)
         
         # Check for platform:chat_id or platform:chat_id:thread_id format
-        if ":" in target:
-            parts = target.split(":", 2)
-            platform_str = parts[0]
+        if ":" in raw_target:
+            parts = raw_target.split(":", 2)
+            platform_str = parts[0].lower()
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
             try:
@@ -85,7 +86,7 @@ class DeliveryTarget:
         
         # Just a platform name (use home channel)
         try:
-            platform = Platform(target)
+            platform = Platform(lowered_target)
             return cls(platform=platform)
         except ValueError:
             # Unknown platform, treat as local
