@@ -995,7 +995,7 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating. TIP: After completing a complex multi-step interaction on a specific site (e.g., logging in, filling a form, scraping data), consider saving the site-specific knowledge as a Hermes skill using skill_manage so future sessions reuse your work.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1024,7 +1024,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_click",
-        "description": "Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). The ref IDs are shown in square brackets in the snapshot output. Requires browser_navigate and browser_snapshot to be called first.",
+        "description": "Click on an element identified by its ref ID from the accessibility snapshot (e.g., '@e5'). After clicking, ALWAYS call browser_vision to verify the click actually worked — clicks on dynamic pages, overlays, or stale refs may fail silently. If the ref-based click fails (element not found, stale ref), use browser_vision to visually locate the target and then use browser_click_xy with coordinates instead. Requires browser_navigate and browser_snapshot to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1034,6 +1034,35 @@ BROWSER_TOOL_SCHEMAS = [
                 }
             },
             "required": ["ref"]
+        }
+    },
+    {
+        "name": "browser_click_xy",
+        "description": "Click at a specific pixel coordinate (x, y) on the page, bypassing the accessibility tree entirely. Use this when ref-based click fails (element not in snapshot, stale refs, iframe/shadow DOM issues, overlays that trap clicks). Use browser_vision with a question like 'What are the coordinates of the X button?' to get pixel locations first. After clicking, call browser_vision again to verify the result. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate (pixels from left edge of viewport)"
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate (pixels from top edge of viewport)"
+                },
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle"],
+                    "description": "Mouse button to click (default: left)",
+                    "default": "left"
+                },
+                "clicks": {
+                    "type": "integer",
+                    "description": "Number of clicks (1=single, 2=double, default: 1)",
+                    "default": 1
+                }
+            },
+            "required": ["x", "y"]
         }
     },
     {
@@ -1103,7 +1132,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_vision",
-        "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page - especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
+        "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page — especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. After performing a click or type action, ALWAYS use this to verify the result visually. To find click targets, ask the vision model for pixel coordinates like 'Where is the Submit button? Give me x,y coordinates.' Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1122,7 +1151,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_console",
-        "description": "Get browser console output and JavaScript errors from the current page. Returns console.log/warn/error/info messages and uncaught JS exceptions. Use this to detect silent JavaScript errors, failed API calls, and application warnings. Requires browser_navigate to be called first. When 'expression' is provided, evaluates JavaScript in the page context and returns the result — use this for DOM inspection, reading page state, or extracting data programmatically.",
+        "description": "Get browser console output and JavaScript errors from the current page. Returns console.log/warn/error/info messages and uncaught JS exceptions. Use this to detect silent JavaScript errors, failed API calls, and application warnings. Requires browser_navigate to be called first. When 'expression' is provided, evaluates JavaScript in the page context and returns the result — use this for DOM inspection, reading page state, or extracting data programmatically. TIP: If the page seems blank or the snapshot returns chrome:///about:// content, use browser_console(expression=\"location.href\") to check if you're on a real page tab vs an internal Chrome page.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1858,7 +1887,6 @@ def browser_snapshot(
         return camofox_snapshot(full, task_id, user_task)
 
     effective_task_id = _last_session_key(task_id or "default")
-    
     # Build command args based on full flag
     args = []
     if not full:
@@ -1937,6 +1965,83 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": result.get("error", f"Failed to click {ref}")
         }, ensure_ascii=False)
+
+
+def browser_click_xy(x: int, y: int, button: str = "left", clicks: int = 1,
+                     task_id: Optional[str] = None) -> str:
+    """Click at a specific pixel coordinate on the page using CDP.
+
+    Bypasses the accessibility tree entirely. Useful when ref-based click
+    fails (stale refs, iframes, shadow DOM, overlays, or elements that
+    the accessibility snapshot doesn't capture).
+
+    Args:
+        x: X coordinate (pixels from left edge of viewport)
+        y: Y coordinate (pixels from top edge of viewport)
+        button: Mouse button ("left", "right", "middle")
+        clicks: Number of clicks (1=single, 2=double)
+        task_id: Task identifier for session isolation
+
+    Returns:
+        JSON string with click result
+    """
+    if _is_camofox_mode():
+        from tools.browser_camofox import camofox_click_xy
+        return camofox_click_xy(x, y, button, clicks, task_id)
+
+    effective_task_id = task_id or "default"
+
+    # Dispatch mousePressed + mouseReleased via CDP through agent-browser's
+    # JavaScript eval capability.
+    click_expr = json.dumps(
+        f"(()=>{{"
+        f"var el=document.elementFromPoint({x},{y});"
+        f"if(!el)return JSON.stringify({{error:'no element at ({x},{y})'}});"
+        f"var o={{bubbles:!0,cancelable:!0,view:window,clientX:{x},clientY:{y},button:0}};"
+        f"el.dispatchEvent(new MouseEvent('mousedown',o));"
+        f"el.dispatchEvent(new MouseEvent('mouseup',o));"
+        f"el.dispatchEvent(new MouseEvent('click',o));"
+        f"var t=(el.textContent||'').trim().slice(0,60);"
+        f"return JSON.stringify({{success:!0,tag:el.tagName,id:(el.id||''),text:t}});"
+        f"}})()"
+    )
+
+    try:
+        result = _run_browser_command(
+            effective_task_id, "eval", [click_expr])
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Coordinate click failed: {e}",
+            "coordinate": {"x": x, "y": y}
+        }, ensure_ascii=False)
+
+    data = result.get("data", {})
+    raw_out = data.get("result", "") or data.get("output", "")
+    click_info = {}
+    try:
+        if isinstance(raw_out, str):
+            click_info = json.loads(raw_out)
+        elif isinstance(raw_out, dict):
+            click_info = raw_out
+    except (json.JSONDecodeError, TypeError):
+        click_info = {"raw": str(raw_out)}
+
+    if click_info.get("error"):
+        return json.dumps({
+            "success": False,
+            "error": click_info["error"],
+            "coordinate": {"x": x, "y": y}
+        }, ensure_ascii=False)
+
+    return json.dumps({
+        "success": click_info.get("success", False),
+        "clicked_at": {"x": x, "y": y},
+        "element": click_info.get("tag", ""),
+        "element_id": click_info.get("id", ""),
+        "element_text": click_info.get("text", ""),
+        "note": "Call browser_vision to verify this click had the expected effect."
+    }, ensure_ascii=False)
 
 
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
@@ -2813,6 +2918,18 @@ registry.register(
     handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="👆",
+)
+registry.register(
+    name="browser_click_xy",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_click_xy"],
+    handler=lambda args, **kw: browser_click_xy(
+        x=args.get("x", 0), y=args.get("y", 0),
+        button=args.get("button", "left"),
+        clicks=args.get("clicks", 1),
+        task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🎯",
 )
 registry.register(
     name="browser_type",

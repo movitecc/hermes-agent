@@ -600,4 +600,29 @@ def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
     })
 
 
+def camofox_click_xy(x: int, y: int, button: str = "left", clicks: int = 1,
+                     task_id: Optional[str] = None) -> str:
+    """Click at coordinate via Camofox REST API."""
+    url = f"{get_camofox_url()}/click"
+    try:
+        resp = requests.post(url, json={
+            "x": x, "y": y, "button": button, "clicks": clicks,
+        }, timeout=_DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        return json.dumps({
+            "success": data.get("success", True),
+            "clicked_at": {"x": x, "y": y},
+            "element": data.get("tag", ""),
+            "element_id": data.get("id", ""),
+            "element_text": data.get("text", ""),
+            "note": "Call browser_vision to verify this click had the expected effect."
+        }, ensure_ascii=False)
+    except requests.RequestException as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Camofox coordinate click failed: {e}",
+            "coordinate": {"x": x, "y": y}
+        }, ensure_ascii=False)
+
 

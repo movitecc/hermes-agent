@@ -1501,6 +1501,13 @@ class WeixinAdapter(BasePlatformAdapter):
         retried_without_token = False
         for attempt in range(self._send_chunk_retries + 1):
             try:
+                # If a prior attempt corrupted the session (e.g. aiohttp
+                # closed its timeout context manager after a failed POST),
+                # rebuild the session before retrying.
+                if attempt > 0 and self._send_session and self._send_session.closed:
+                    self._send_session = aiohttp.ClientSession(
+                        trust_env=True, connector=_make_ssl_connector(),
+                    )
                 resp = await _send_message(
                     self._send_session,
                     base_url=self._base_url,
