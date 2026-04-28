@@ -81,54 +81,154 @@ That is why LCM positioning should focus on **retrieval quality, autonomy, and d
 
 ## Install
 
-```bash
-# Clone into the context engine plugin directory
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/hermes-agent/plugins/context_engine/lcm
-
-# Or for a specific profile
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/profiles/myprofile/hermes-agent/plugins/context_engine/lcm
-```
-
-## Update
+Canonical install path: clone `hermes-lcm` as a **general user plugin**.
 
 ```bash
-cd ~/.hermes/hermes-agent/plugins/context_engine/lcm && git pull
+git clone https://github.com/stephenschoettler/hermes-lcm \
+  ~/.hermes/plugins/hermes-lcm
 ```
 
-Restart Hermes after updating.
+For a profile-specific install:
 
-> **Note:** Context engines must be installed under `plugins/context_engine/<name>/`,
-> not `plugins/<name>/`. The general `~/.hermes/plugins/` directory is for tools,
-> hooks, and CLI extensions — context engines are discovered separately.
-
-Restart Hermes. Activate the engine — either via the interactive UI or config file:
-
-**Option A — `hermes plugins` UI:**
-
-```
-hermes plugins
+```bash
+git clone https://github.com/stephenschoettler/hermes-lcm \
+  ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
-The composite plugins screen shows provider categories at the bottom.
-Select **Context Engine** and pick `lcm` from the radiolist.
+Or, from an existing checkout, install a symlink with the helper script:
 
-**Option B — config.yaml:**
+```bash
+./scripts/install.sh
+# Optional profile-aware install:
+HERMES_PROFILE=myprofile ./scripts/install.sh
+```
+
+## Activation
+
+This install path uses **two names**:
+
+- plugin manifest name: `hermes-lcm`
+- runtime context engine name: `lcm`
+
+Your config must include both:
 
 ```yaml
+plugins:
+  enabled:
+    - hermes-lcm
+
 context:
   engine: lcm
 ```
 
-Verify with `hermes plugins`:
+Why both matter:
+
+- `plugins.enabled` loads the standalone plugin from `~/.hermes/plugins/hermes-lcm`
+- `context.engine: lcm` selects the registered context engine at runtime
+
+## Update
+
+If you cloned directly into the final plugin directory:
+
+```bash
+cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
+```
+
+For a profile-specific install:
+
+```bash
+cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
+```
+
+If you used the helper scripts from a separate checkout:
+
+```bash
+./scripts/update.sh
+```
+
+Restart Hermes after updating.
+
+## Verification
+
+Run:
+
+```bash
+hermes plugins
+```
+
+Expected signals:
+
+- the plugin list includes `hermes-lcm`
+- the selected context engine is `lcm`
+
+Typical output looks like:
 
 ```
 Plugins (1):
-  ✓ hermes-lcm v0.6.0 (6 tools)
+  ✓ hermes-lcm v0.7.1 (6 tools)
 
 Provider Plugins:
   Context Engine: lcm
+```
+
+At runtime the tool list should include:
+
+- `lcm_grep`
+- `lcm_describe`
+- `lcm_expand`
+- `lcm_expand_query`
+- `lcm_status`
+- `lcm_doctor`
+
+## Troubleshooting signals
+
+### `hermes plugins` shows `lcm (not found)` but LCM tools still exist
+
+If all of these are true:
+
+- `plugins.enabled` contains `hermes-lcm`
+- `context.engine: lcm` is set
+- the runtime exposes LCM tools (or `/lcm` if enabled)
+
+then LCM itself is loaded.
+
+In that situation, a `Context Engine: lcm (not found)` line in `hermes plugins` is a **Hermes host discovery/UI issue**, not proof that `hermes-lcm` failed to load.
+
+Treat it as a host-side mismatch between the picker/status surface and the live runtime. The fix belongs in Hermes host discovery/UI, not in LCM storage or compaction logic.
+
+### `/lcm status` shows unbound / zero-looking session details right after restart
+
+Right after a fresh Hermes restart, `/lcm status` may show things like:
+
+- `session_id: (unbound)`
+- `session_platform: (unbound)`
+- `threshold_tokens: (uninitialized)`
+
+That means the current Hermes process has not yet bound LCM to a live session. It does **not** mean the database is empty or that LCM lost prior history.
+
+After restart, send one normal Hermes message first, then re-run `lcm_status` or `/lcm status` if you want live per-session fields such as `dag_nodes` and `store_messages`.
+
+## Legacy install path
+
+Hermes still supports repo-shipped context engines under `plugins/context_engine/<name>/`, and older `hermes-lcm` installs may still live there.
+
+That path is now a compatibility fallback, not the preferred install model. The standalone general-plugin path above is canonical because it survives Hermes updates cleanly.
+
+If you are migrating an older install, move the checkout and then enable the plugin explicitly:
+
+```bash
+mv ~/.hermes/hermes-agent/plugins/context_engine/lcm ~/.hermes/plugins/hermes-lcm
+```
+
+Then make sure your config includes:
+
+```yaml
+plugins:
+  enabled:
+    - hermes-lcm
+
+context:
+  engine: lcm
 ```
 
 ## Configuration
@@ -152,8 +252,8 @@ Environment variables (all optional):
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Character threshold above which tool results are externalized |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` | `~/.hermes/lcm-large-outputs` | Override storage directory for externalized payloads |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Opt-in rewrite of already-externalized summarized tool-result transcript rows to compact GC placeholders |
-| `LCM_SUMMARY_MODEL` | *(auxiliary)* | Override model for summarization |
-| `LCM_EXPANSION_MODEL` | *(summary model / auxiliary)* | Override model for `lcm_expand_query` synthesis |
+| `LCM_SUMMARY_MODEL` | *(auxiliary)* | Override model for summarization. Slash-bearing aggregator model slugs such as `meta-llama/...`, `anthropic/...`, and unresolved `cerebras/...` stay model-only. |
+| `LCM_EXPANSION_MODEL` | *(summary model / auxiliary)* | Override model for `lcm_expand_query` synthesis. Uses the same routing rules as `LCM_SUMMARY_MODEL`. |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for a single model-backed summarization call |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for `lcm_expand_query` answer synthesis |
 | `LCM_DATABASE_PATH` | `~/.hermes/lcm.db` | SQLite database path (auto profile-scoped) |
@@ -161,6 +261,38 @@ Environment variables (all optional):
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Opt-in registration for `/lcm` gateway slash commands (recommended only for trusted operator contexts) |
 
 The point-8 compaction knobs are intentionally opt-in. `cache_friendly_*` is a plugin-local prompt-stability heuristic, not a claim that Hermes currently passes true prompt-cache metrics into `hermes-lcm`.
+
+Provider-prefixed LCM model overrides are conservative. `cerebras/gpt-oss-120b` routes as `provider=cerebras`, `model=gpt-oss-120b` only when the Hermes host can resolve `cerebras` as a built-in provider or as a named custom provider in `providers:` / `custom_providers`. If not, it remains `model=cerebras/gpt-oss-120b` so aggregator-style slugs do not accidentally become unknown direct providers.
+
+### Threshold ownership when `context.engine: lcm` is active
+
+This is the easy place to get crossed wires.
+
+When Hermes is configured with:
+
+```yaml
+context:
+  engine: lcm
+```
+
+`hermes-lcm` becomes the active context engine for compaction decisions.
+
+That means:
+
+- `LCM_CONTEXT_THRESHOLD` is the threshold that LCM uses to decide when to compact
+- Hermes core `compression.threshold` belongs to the built-in `ContextCompressor`, not to LCM
+- Hermes core `compression.enabled` is still the global on/off gate for whether compaction is allowed at all, so leave it enabled when using LCM
+
+Practical rule:
+
+- if you want LCM to compact earlier or later, tune `LCM_CONTEXT_THRESHOLD`
+- do **not** expect changing Hermes `compression.threshold` to be the normal way to tune LCM behavior
+
+Important operator note:
+
+Some Hermes host builds still print the host-side compression percentage in startup/status surfaces even when LCM is the active engine. If that printed percentage disagrees with LCM, trust live LCM runtime status (`lcm_status` or `/lcm status`) after a normal message has initialized the session, not the startup banner text.
+
+If raising Hermes `compression.threshold` seems to change LCM behavior materially, that usually points to host-version confusion, a misleading host status surface, or another Hermes-side integration issue — not to the intended LCM threshold contract.
 
 ### Large tool-output handling
 
@@ -315,9 +447,11 @@ No Hermes Agent checkout required — the test suite includes a lightweight ABC 
 
 Requires the **pluggable context engine slot** — an ABC (`ContextEngine`) in
 hermes-agent core that makes the `ContextCompressor` swappable via the plugin
-system. Config-driven selection via `context.engine` in config.yaml, with a
-`plugins/context_engine/` discovery directory. Same pattern as OpenClaw's
-`contextEngine` slot + `lossless-claw`.
+system. Config-driven selection still happens via `context.engine` in
+`config.yaml`, but standalone installs now come from the canonical general-plugin
+path `~/.hermes/plugins/hermes-lcm` rather than the older in-repo
+`plugins/context_engine/` layout. Same pattern as OpenClaw's `contextEngine`
+slot + `lossless-claw`.
 
 - **PR:** [NousResearch/hermes-agent#7464](https://github.com/NousResearch/hermes-agent/pull/7464) (supersedes [#6126](https://github.com/NousResearch/hermes-agent/pull/6126), [#5700](https://github.com/NousResearch/hermes-agent/pull/5700))
 - **Issue:** [NousResearch/hermes-agent#5701](https://github.com/NousResearch/hermes-agent/issues/5701) (closed by #7464)

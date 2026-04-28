@@ -14,7 +14,7 @@ from typing import Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 4
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 _MIN_DISK_SPACE_BYTES = 50 * 1024 * 1024
 
@@ -122,30 +122,6 @@ def ensure_lifecycle_state_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE lcm_lifecycle_state ADD COLUMN last_maintenance_attempt_at REAL"
         )
-
-
-def ensure_iteration_records_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS lcm_iteration_records (
-            record_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            status TEXT NOT NULL,
-            signals TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            git_commit TEXT,
-            failed_tests TEXT NOT NULL,
-            lesson TEXT,
-            next_action TEXT,
-            artifact_refs TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_lcm_iteration_records_session_created_at ON lcm_iteration_records(session_id, created_at)"
-    )
 
 
 def mark_migration_step_complete(conn: sqlite3.Connection, step_name: str) -> None:
@@ -331,10 +307,5 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 4:
         mark_migration_step_complete(conn, "v4_lifecycle_debt_columns")
         current_version = 4
-
-    ensure_iteration_records_table(conn)
-    if current_version < 5:
-        mark_migration_step_complete(conn, "v5_iteration_records")
-        current_version = 5
 
     set_schema_version(conn, current_version)

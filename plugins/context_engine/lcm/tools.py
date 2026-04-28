@@ -13,6 +13,7 @@ from .externalize import (
     load_externalized_payload,
 )
 from .extraction import sanitize_pre_compaction_content
+from .model_routing import apply_lcm_model_route
 from .search_query import AGE_DECAY_RATE, normalize_search_sort
 
 if TYPE_CHECKING:
@@ -231,13 +232,13 @@ def _synthesize_expansion_answer(
         "max_tokens": max_tokens,
         "timeout": timeout,
     }
-    if model:
-        call_kwargs["model"] = model
+    apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
     content = response.choices[0].message.content
     if not isinstance(content, str):
         content = str(content) if content else ""
-    return content.strip()
+    from .escalation import _strip_reasoning_blocks
+    return _strip_reasoning_blocks(content).strip()
 
 
 def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
@@ -494,8 +495,9 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     nodes = []
     if raw_node_ids:
         for node_id in raw_node_ids:
-            parsed_node_id, node_id_error = _parse_int_arg("node_ids", node_id)
-            if node_id_error:
+            try:
+                parsed_node_id = int(node_id)
+            except (TypeError, ValueError):
                 return json.dumps({"error": "node_ids must contain only integers"})
             node = _get_session_node(engine, parsed_node_id)
             if node is not None:
@@ -719,10 +721,9 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     # 5. Source-lineage hygiene
     try:
         source_stats = engine._store.get_source_stats()
-        legacy_blank_messages = source_stats["legacy_blank_source_messages"]
         checks.append({
             "check": "source_lineage_hygiene",
-            "status": "pass" if legacy_blank_messages == 0 else "warn",
+            "status": "pass",
             "detail": {
                 **source_stats,
                 "normalization_mode": "backcompat-normalization",

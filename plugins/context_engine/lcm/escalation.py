@@ -9,11 +9,35 @@ Each level checks if Tokens(summary) < Tokens(source). If not, escalates.
 
 import inspect
 import logging
+import re
 from typing import List, Optional
 
+from .model_routing import apply_lcm_model_route
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
+
+
+# Strip inline reasoning blocks emitted by thinking models (MiniMax-M2.7,
+# GLM-5.1, Qwen QwQ, DeepSeek R1, etc.) before persisting summary text.
+# Without this, the reasoning content — which often quotes the summarizer
+# system prompt verbatim — gets stored as the summary and later confuses
+# lcm_expand_query, which feeds the summary back to the model as context.
+# Tags mirror the set handled in hermes-agent run_agent.py.
+_THINK_BLOCK_RE = re.compile(
+    r"<(?P<tag>think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\s*>"
+    r".*?"
+    r"</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_reasoning_blocks(text: str) -> str:
+    """Remove <think>/<thinking>/<reasoning>/<thought>/<REASONING_SCRATCHPAD>
+    blocks from ``text``. Idempotent and safe on text without any tags."""
+    if not text or "<" not in text:
+        return text
+    return _THINK_BLOCK_RE.sub("", text)
 
 
 def _call_llm_for_summary(prompt: str, max_tokens: int,
@@ -27,15 +51,14 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
             "temperature": 0.3,
             "max_tokens": max_tokens,
         }
-        if model:
-            call_kwargs["model"] = model
+        apply_lcm_model_route(call_kwargs, model)
         if timeout is not None:
             call_kwargs["timeout"] = timeout
         response = call_llm(**call_kwargs)
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
-        return content.strip()
+        return _strip_reasoning_blocks(content).strip()
     except Exception as e:
         logger.warning("LLM summarization failed: %s", e)
         return None

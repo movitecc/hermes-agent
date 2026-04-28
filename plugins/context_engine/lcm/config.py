@@ -7,10 +7,6 @@ def _parse_pattern_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _parse_csv_list(raw: str) -> list[str]:
-    return [part.strip() for part in raw.split(",") if part.strip()]
-
-
 def _parse_int_env(key: str, default: int) -> int:
     raw = os.environ.get(key)
     if raw is None:
@@ -139,22 +135,6 @@ class LCMConfig:
     # Safety gate: destructive `/lcm doctor clean apply` workflow is disabled by default.
     doctor_clean_apply_enabled: bool = False
 
-    # -- Evolver bridge ---
-    # Optional, best-effort post-run reviewer. Disabled by default.
-    evolver_enabled: bool = False
-    # Explicit binary path; empty = resolve `evolver` from PATH.
-    evolver_path: str = ""
-    # Extra args inserted before the evidence/run-bundle path.
-    evolver_args: list[str] = field(default_factory=lambda: ["review"])
-    # Safety timeout for the review process.
-    evolver_timeout_ms: int = 60_000
-    # When enabled, a failure at shutdown can queue a follow-up cron review.
-    evolver_schedule_enabled: bool = False
-    # One-shot delay used for failure-triggered follow-up reviews.
-    evolver_followup_delay: str = "15m"
-    # Delivery target for scheduled review jobs.
-    evolver_schedule_deliver: str = "local"
-
     @classmethod
     def from_env(cls) -> "LCMConfig":
         """Build config from environment variables (LCM_ prefix)."""
@@ -221,21 +201,6 @@ class LCMConfig:
         c.doctor_clean_apply_enabled = _parse_bool_env(
             "LCM_DOCTOR_CLEAN_APPLY_ENABLED",
             c.doctor_clean_apply_enabled,
-        )
-        c.evolver_enabled = _parse_bool_env("LCM_EVOLVER_ENABLED", c.evolver_enabled)
-        c.evolver_path = _str("LCM_EVOLVER_PATH", c.evolver_path)
-        raw_evolver_args = os.environ.get("LCM_EVOLVER_ARGS")
-        if raw_evolver_args is not None:
-            c.evolver_args = _parse_csv_list(raw_evolver_args)
-        c.evolver_timeout_ms = _int("LCM_EVOLVER_TIMEOUT_MS", c.evolver_timeout_ms)
-        c.evolver_schedule_enabled = _parse_bool_env(
-            "LCM_EVOLVER_SCHEDULE_ENABLED",
-            c.evolver_schedule_enabled,
-        )
-        c.evolver_followup_delay = _str("LCM_EVOLVER_FOLLOWUP_DELAY", c.evolver_followup_delay)
-        c.evolver_schedule_deliver = _str(
-            "LCM_EVOLVER_SCHEDULE_DELIVER",
-            c.evolver_schedule_deliver,
         )
 
         raw_ignore = os.environ.get("LCM_IGNORE_SESSION_PATTERNS")

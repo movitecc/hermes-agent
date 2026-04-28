@@ -37,6 +37,19 @@ def test_lcm_status_default_reports_current_session(engine):
     assert "dag_nodes: 0" in result
 
 
+def test_lcm_status_does_not_leak_prior_session_compaction_count_after_rebind(engine):
+    engine.compression_count = 4
+    engine.last_prompt_tokens = 8000
+    engine.on_session_start("fresh-session", platform="telegram", context_length=200000)
+
+    result = handle_lcm_command("status", engine)
+
+    assert "session_id: fresh-session" in result
+    assert "compression_count: 0" in result
+    assert "store_messages: 0" in result
+    assert "dag_nodes: 0" in result
+
+
 def test_lcm_status_explains_unbound_runtime_before_first_session(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "lcm_unbound.db"))
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes_home"))
@@ -107,7 +120,7 @@ def test_lcm_doctor_distinguishes_observations_from_recommended_actions(tmp_path
     assert "/lcm backup" in result
 
 
-def test_lcm_doctor_reports_legacy_blank_source_observation_and_action(engine):
+def test_lcm_doctor_reports_legacy_blank_source_as_observation_without_warning(engine):
     engine._store.append("sess-known", {"role": "user", "content": "cli message"}, source="cli")
     engine._store.append("sess-unknown", {"role": "user", "content": "unknown message"})
     engine._store._conn.execute(
@@ -120,10 +133,12 @@ def test_lcm_doctor_reports_legacy_blank_source_observation_and_action(engine):
 
     result = handle_lcm_command("doctor", engine)
 
+    assert "status: ok" in result
     assert "source_lineage:" in result
     assert "legacy_blank=1" in result
     assert "effective_unknown=2" in result
-    assert "review legacy blank-source rows before any destructive cleanup" in result
+    assert "recommended_actions:\n- none" in result
+    assert "review legacy blank-source rows before any destructive cleanup" not in result
 
 
 def test_lcm_help_on_unknown_subcommand(engine):

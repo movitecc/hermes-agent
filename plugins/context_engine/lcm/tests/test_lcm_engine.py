@@ -28,6 +28,197 @@ def engine(tmp_path):
     return e
 
 
+class TestEscalationStripReasoning:
+    """Regression tests for thinking-model reasoning-tag stripping in
+    escalation._call_llm_for_summary. Some thinking models (MiniMax-M2.7,
+    GLM-5.1, Qwen QwQ, DeepSeek R1) inline reasoning inside <think>...</think>
+    blocks within message.content; without stripping, the reasoning text gets
+    persisted as the summary node and confuses downstream lcm_expand_query."""
+
+    def _install_fake_auxiliary_client(self, monkeypatch, fake_call_llm):
+        """Install a minimal agent.auxiliary_client module for CI, where the
+        hermes-agent package is only stubbed enough for ContextEngine tests."""
+        import sys
+        import types
+
+        agent_mod = sys.modules.get("agent") or types.ModuleType("agent")
+        aux_mod = types.ModuleType("agent.auxiliary_client")
+        aux_mod.call_llm = fake_call_llm
+        agent_mod.auxiliary_client = aux_mod
+        monkeypatch.setitem(sys.modules, "agent", agent_mod)
+        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", aux_mod)
+        return aux_mod
+
+    def test_strip_reasoning_blocks_handles_each_supported_tag(self):
+        from hermes_lcm.escalation import _strip_reasoning_blocks
+
+        cases = [
+            ("<think>internal reasoning</think>final summary", "final summary"),
+            ("<thinking>plan</thinking>actual content", "actual content"),
+            ("<reasoning>scratch</reasoning>output", "output"),
+            ("<thought>idea</thought>summary text", "summary text"),
+            ("<REASONING_SCRATCHPAD>foo</REASONING_SCRATCHPAD>bar", "bar"),
+            ("multi\n<think>line\nblock</think>\nrest", "multi\n\nrest"),
+            ("plain text without tags", "plain text without tags"),
+            ("", ""),
+        ]
+        for raw, expected in cases:
+            got = _strip_reasoning_blocks(raw)
+            assert got == expected, f"input={raw!r} expected={expected!r} got={got!r}"
+
+    def test_strip_reasoning_blocks_is_idempotent(self):
+        from hermes_lcm.escalation import _strip_reasoning_blocks
+
+        once = _strip_reasoning_blocks("<think>foo</think>bar")
+        twice = _strip_reasoning_blocks(once)
+        assert once == twice == "bar"
+
+    def test_strip_reasoning_blocks_handles_multiple_blocks(self):
+        from hermes_lcm.escalation import _strip_reasoning_blocks
+
+        raw = "<think>a</think>visible1<think>b</think>visible2"
+        assert _strip_reasoning_blocks(raw) == "visible1visible2"
+
+    def test_strip_reasoning_blocks_preserves_content_with_unrelated_angle_brackets(self):
+        from hermes_lcm.escalation import _strip_reasoning_blocks
+
+        raw = "Decision: x < y, and config <foo> stays"
+        assert _strip_reasoning_blocks(raw) == raw
+
+    def test_call_llm_for_summary_strips_reasoning_from_response(self, monkeypatch):
+        """Integration: when the auxiliary LLM returns reasoning-contaminated
+        content, _call_llm_for_summary returns the stripped summary text."""
+        import hermes_lcm.escalation as esc
+
+        class _FakeMessage:
+            def __init__(self, content):
+                self.content = content
+
+        class _FakeChoice:
+            def __init__(self, content):
+                self.message = _FakeMessage(content)
+
+        class _FakeResponse:
+            def __init__(self, content):
+                self.choices = [_FakeChoice(content)]
+
+        contaminated = (
+            "<think>The user asks me to compress this into bullet points. "
+            "I should focus on decisions, files, errors, current state...</think>"
+            "Summary: docker rollout completed. Auth migration pending review."
+        )
+
+        def fake_call_llm(**kwargs):
+            return _FakeResponse(contaminated)
+
+        # Patch the import inside _call_llm_for_summary by providing the
+        # module the function imports from at call time.
+        self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
+
+        result = esc._call_llm_for_summary(
+            prompt="please summarize",
+            max_tokens=200,
+            model="any",
+            timeout=10.0,
+        )
+
+        assert result is not None
+        assert "<think>" not in result
+        assert "</think>" not in result
+        assert "Summary: docker rollout completed" in result
+
+
+    def test_synthesize_expansion_answer_strips_reasoning_from_response(self, monkeypatch):
+        """Integration: lcm_expand_query routes through
+        tools._synthesize_expansion_answer, which is a separate LLM call path
+        from _call_llm_for_summary. Both must strip reasoning blocks before
+        returning, otherwise expand_query answers leak the model's internal
+        reasoning back to the caller."""
+        import hermes_lcm.tools as tools_mod
+
+        class _FakeMessage:
+            def __init__(self, content):
+                self.content = content
+
+        class _FakeChoice:
+            def __init__(self, content):
+                self.message = _FakeMessage(content)
+
+        class _FakeResponse:
+            def __init__(self, content):
+                self.choices = [_FakeChoice(content)]
+
+        contaminated = (
+            "<think>The user is asking what was discussed. Let me look at the "
+            "context blocks and synthesize an answer...</think>"
+            "We discussed the docker rollout plan and auth migration."
+        )
+
+        def fake_call_llm(**kwargs):
+            return _FakeResponse(contaminated)
+
+        self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
+
+        result = tools_mod._synthesize_expansion_answer(
+            prompt="What was discussed?",
+            context_blocks=[{"role": "user", "content": "ignored in fake"}],
+            model="any",
+            max_tokens=200,
+            timeout=10.0,
+        )
+
+        assert result is not None
+        assert "<think>" not in result
+        assert "</think>" not in result
+        assert "We discussed the docker rollout plan" in result
+
+
+    def test_call_extraction_llm_strips_reasoning_from_response(self, monkeypatch):
+        """Integration: pre-compaction extraction routes through
+        extraction._call_extraction_llm, the third LLM call path on top of
+        _call_llm_for_summary (escalation) and _synthesize_expansion_answer
+        (tools). All three must strip reasoning blocks before returning,
+        otherwise the daily extraction .md file ends up with the model's
+        internal reasoning instead of clean bullet points."""
+        import hermes_lcm.extraction as extr
+
+        class _FakeMessage:
+            def __init__(self, content):
+                self.content = content
+
+        class _FakeChoice:
+            def __init__(self, content):
+                self.message = _FakeMessage(content)
+
+        class _FakeResponse:
+            def __init__(self, content):
+                self.choices = [_FakeChoice(content)]
+
+        contaminated = (
+            "<think>Let me extract the relevant information from this "
+            "conversation segment. Decisions made: ... Let me format these "
+            "as clean bullet points.</think>"
+            "- Decision: ship docker rollout on 2026-07-22\n"
+            "- Action: Yvonne files FCC paperwork by 2026-06-30"
+        )
+
+        def fake_call_llm(**kwargs):
+            return _FakeResponse(contaminated)
+
+        self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
+
+        result = extr._call_extraction_llm(
+            prompt="extract decisions",
+            model="any",
+            timeout=10.0,
+        )
+
+        assert result is not None
+        assert "<think>" not in result
+        assert "</think>" not in result
+        assert "Decision: ship docker rollout" in result
+
+
 class TestEngineABC:
     def test_is_context_engine(self, engine):
         assert isinstance(engine, ContextEngine)
@@ -95,6 +286,27 @@ class TestEngineABC:
         engine.on_session_reset()
         assert engine.compression_count == 0
         assert engine.last_prompt_tokens == 0
+
+    def test_on_session_start_resets_session_scoped_runtime_when_binding_new_session(self, engine):
+        engine.compression_count = 5
+        engine.last_prompt_tokens = 9999
+        engine.last_completion_tokens = 333
+        engine.last_total_tokens = 10332
+        engine._last_compacted_store_id = 42
+        engine._ingest_cursor = 7
+        engine._context_probed = True
+        engine._context_probe_persistable = True
+        engine.on_session_start("fresh-session", platform="telegram", context_length=200000)
+
+        assert engine._session_id == "fresh-session"
+        assert engine.compression_count == 0
+        assert engine.last_prompt_tokens == 0
+        assert engine.last_completion_tokens == 0
+        assert engine.last_total_tokens == 0
+        assert engine._last_compacted_store_id == 0
+        assert engine._ingest_cursor == 0
+        assert engine._context_probed is False
+        assert engine._context_probe_persistable is False
 
     def test_get_status(self, engine):
         status = engine.get_status()
@@ -1124,6 +1336,142 @@ class TestSessionRollover:
         assert len(engine._dag.get_session_nodes("victim-session")) == 1
         assert engine._dag.get_session_nodes("attacker-new") == []
         assert engine._session_id == "attacker-new"
+
+    def test_compression_boundary_continues_logical_session_without_resetting_state(self, engine):
+        engine.on_session_start("old-session", platform="telegram", context_length=200000)
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "important pre-rollover context"},
+            token_estimate=17,
+            source="telegram",
+        )
+        engine._dag.add_node(SummaryNode(
+            session_id="old-session",
+            depth=0,
+            summary="pre-rollover summary",
+            token_count=5,
+            source_token_count=17,
+            source_ids=[store_id],
+            source_type="messages",
+            created_at=time.time(),
+        ))
+        engine.compression_count = 1
+        engine.last_prompt_tokens = 1000
+        engine.last_completion_tokens = 50
+        engine.last_total_tokens = 1050
+        engine._last_compacted_store_id = store_id
+        engine._ingest_cursor = 2
+        old_conversation_id = engine._conversation_id
+
+        engine.on_session_start(
+            "new-session",
+            boundary_reason="compression",
+            old_session_id="old-session",
+            platform="telegram",
+            context_length=200000,
+        )
+
+        assert engine._session_id == "new-session"
+        assert engine._conversation_id == old_conversation_id
+        assert engine.compression_count == 1
+        assert engine.last_prompt_tokens == 1000
+        assert engine.last_completion_tokens == 50
+        assert engine.last_total_tokens == 1050
+        assert engine._last_compacted_store_id == store_id
+        assert engine._ingest_cursor == 2
+        assert engine._store.get_session_count("old-session") == 0
+        assert engine._store.get_session_count("new-session") == 1
+        assert engine._dag.get_session_nodes("old-session") == []
+        new_nodes = engine._dag.get_session_nodes("new-session")
+        assert len(new_nodes) == 1
+        assert new_nodes[0].summary == "pre-rollover summary"
+
+        status = engine.get_status()
+        assert status["store_messages"] == 1
+        assert status["dag_nodes"] == 1
+        assert status["compression_count"] == 1
+        assert status["lifecycle"]["current_session_id"] == "new-session"
+        assert status["lifecycle"]["last_finalized_session_id"] == "old-session"
+        assert status["lifecycle"]["current_frontier_store_id"] == store_id
+        assert status["lifecycle"]["last_finalized_frontier_store_id"] == store_id
+        assert status["lifecycle"]["last_rollover_at"] is not None
+        assert status["lifecycle"]["last_reset_at"] is None
+
+    def test_compression_boundary_mismatch_resets_session_scoped_state(self, engine):
+        engine.on_session_start("bound-session", platform="telegram", context_length=200000)
+        engine.compression_count = 3
+        engine.last_prompt_tokens = 900
+        engine.last_completion_tokens = 12
+        engine.last_total_tokens = 912
+        engine._last_compacted_store_id = 42
+        engine._ingest_cursor = 7
+        old_conversation_id = engine._conversation_id
+
+        engine.on_session_start(
+            "new-session",
+            boundary_reason="compression",
+            old_session_id="different-old-session",
+            platform="telegram",
+            context_length=200000,
+        )
+
+        assert engine._session_id == "new-session"
+        assert engine._conversation_id != old_conversation_id
+        assert engine.compression_count == 0
+        assert engine.last_prompt_tokens == 0
+        assert engine.last_completion_tokens == 0
+        assert engine.last_total_tokens == 0
+        assert engine._last_compacted_store_id == 0
+        assert engine._ingest_cursor == 0
+
+    def test_compression_boundary_reassigns_externalized_payload_session_metadata(self, tmp_path):
+        config = LCMConfig(
+            database_path=str(tmp_path / "lcm_compression_externalized.db"),
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=200,
+        )
+        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
+        engine.on_session_start("old-session", platform="telegram", context_length=200000)
+
+        content = "RESULT:\n" + ("abcdef" * 2000)
+        engine._serialize_messages([
+            {"role": "tool", "tool_call_id": "call_big", "content": content}
+        ])
+        payload_file = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json"))
+        placeholder = (
+            "[Externalized tool output: tool_call_id=call_big; "
+            f"chars={len(content)}; bytes={len(content.encode('utf-8'))}; ref={payload_file.name}]"
+        )
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "tool", "tool_call_id": "call_big", "content": placeholder},
+            token_estimate=17,
+            source="telegram",
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="old-session",
+            depth=0,
+            summary="Externalized tool-output summary",
+            token_count=10,
+            source_token_count=17,
+            source_ids=[store_id],
+            source_type="messages",
+            created_at=time.time(),
+        ))
+        assert json.loads(payload_file.read_text())["session_id"] == "old-session"
+
+        engine.on_session_start(
+            "new-session",
+            boundary_reason="compression",
+            old_session_id="old-session",
+            platform="telegram",
+            context_length=200000,
+        )
+
+        assert json.loads(payload_file.read_text())["session_id"] == "new-session"
+        result = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": node_id}))
+        assert result["expanded"][0]["externalized"]["session_id"] == "new-session"
+        assert result["expanded"][0]["externalized"]["tool_call_id"] == "call_big"
 
     def test_rollover_session_records_durable_lifecycle_state_idempotently(self, engine):
         engine._config.new_session_retain_depth = 2
@@ -3159,6 +3507,37 @@ class TestEngineTools:
 
         assert result["error"] == "node_ids must contain only integers"
 
+    def test_handle_expand_query_accepts_valid_integer_node_ids(self, engine, monkeypatch):
+        engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary="Docker rollout summary",
+                token_count=10,
+                source_token_count=20,
+                source_ids=[1],
+                source_type="messages",
+                created_at=0,
+            )
+        )
+
+        def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
+            return "Expansion answer"
+
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {"node_ids": [node_id], "prompt": "What was the plan?"},
+            )
+        )
+
+        assert "error" not in result, f"unexpected error: {result.get('error')}"
+        assert result["answer"] == "Expansion answer"
+        assert result["node_ids"] == [node_id]
+
     def test_describe_and_expand_are_session_scoped(self, engine):
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -3258,6 +3637,22 @@ class TestEngineTools:
         assert "orphaned_dag_nodes" in check_names
         assert "config_validation" in check_names
         assert all(c["status"] == "pass" for c in result["checks"])
+
+    def test_handle_doctor_treats_legacy_blank_source_rows_as_healthy(self, engine):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("legacy-session", "", "user", "legacy blank source", None, None, None, 1.0, 5, 0),
+        )
+        engine._store._conn.commit()
+
+        result = json.loads(engine.handle_tool_call("lcm_doctor", {}))
+
+        assert result["overall"] == "healthy"
+        lineage_check = next(c for c in result["checks"] if c["check"] == "source_lineage_hygiene")
+        assert lineage_check["status"] == "pass"
+        assert lineage_check["detail"]["legacy_blank_source_messages"] == 1
 
     def test_handle_doctor_warns_on_bad_config(self, tmp_path):
         config = LCMConfig(

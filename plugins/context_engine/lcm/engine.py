@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,14 +16,12 @@ from agent.context_engine import ContextEngine
 
 from .config import LCMConfig
 from .dag import SummaryDAG, SummaryNode
-from .iteration_schema import IterationRecord
-from .lesson_distiller import distill_lessons, select_lesson_for_record
-from .evolver_bridge import review_iteration_bundle, schedule_evolver_review_job
 from .escalation import summarize_with_escalation
 from .externalize import (
     build_transcript_gc_placeholder,
     maybe_externalize_tool_output,
     find_externalized_payload_for_message,
+    reassign_externalized_payloads,
 )
 from .extraction import (
     extract_before_compaction,
@@ -120,8 +117,6 @@ class LCMEngine(ContextEngine):
         self.summary_model = self._config.summary_model
         self._last_overflow_recovery_failed = False
         self._last_condensation_suppressed_reason = ""
-        self._last_iteration_record_session_id = ""
-        self._api_call_count = 0
         self._logged_filter_config = False
 
     @property
@@ -542,15 +537,22 @@ class LCMEngine(ContextEngine):
         if self._has_raw_backlog_debt():
             self._lifecycle.clear_debt(self._conversation_id)
 
-    def on_session_start(self, session_id: str, **kwargs) -> None:
-        self._session_id = session_id
-        self._session_platform = str(kwargs.get("platform") or "")
-        self._ingest_cursor = 0
+    def _reset_session_scoped_runtime_state(self) -> None:
+        self.compression_count = 0
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+        self.last_total_tokens = 0
         self._last_compacted_store_id = 0
+        self._ingest_cursor = 0
+        self._context_probed = False
+        self._context_probe_persistable = False
         self._last_overflow_recovery_failed = False
         self._last_condensation_suppressed_reason = ""
+
+    def _apply_session_start_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
+        self._session_id = session_id
+        self._session_platform = str(kwargs.get("platform") or "")
         self._refresh_session_filters()
-        self._last_iteration_record_session_id = ""
         if "hermes_home" in kwargs:
             self._hermes_home = kwargs["hermes_home"]
         # Pick up context_length from kwargs if provided
@@ -559,205 +561,105 @@ class LCMEngine(ContextEngine):
             self.threshold_tokens = int(
                 self.context_length * self._config.context_threshold
             )
+
+    def _continue_compression_boundary(
+        self,
+        session_id: str,
+        old_session_id: str,
+        kwargs: Dict[str, Any],
+    ) -> None:
+        previous_session_id = self._session_id
+        prior_state = self._lifecycle.get_by_session(old_session_id)
+        conversation_id = (
+            kwargs.get("conversation_id")
+            or self._conversation_id
+            or (prior_state.conversation_id if prior_state else None)
+            or old_session_id
+            or session_id
+        )
+        frontier = max(
+            int(self._last_compacted_store_id or 0),
+            int(prior_state.current_frontier_store_id if prior_state else 0),
+        )
+        can_reassign = bool(
+            old_session_id
+            and session_id
+            and old_session_id != session_id
+            and (not previous_session_id or previous_session_id == old_session_id)
+        )
+
+        if can_reassign:
+            self._lifecycle.finalize_session(
+                conversation_id,
+                old_session_id,
+                frontier_store_id=frontier,
+            )
+            moved_messages = self._store.reassign_session_messages(old_session_id, session_id)
+            moved_nodes = self._dag.reassign_session_nodes(old_session_id, session_id)
+            moved_payloads = reassign_externalized_payloads(
+                old_session_id,
+                session_id,
+                config=self._config,
+                hermes_home=self._hermes_home,
+            )
+            logger.debug(
+                "LCM compression boundary continued %s -> %s: moved %d messages, %d DAG nodes, %d externalized payloads",
+                old_session_id,
+                session_id,
+                moved_messages,
+                moved_nodes,
+                moved_payloads,
+            )
+        elif old_session_id:
+            logger.warning(
+                "LCM compression boundary skipped carry-over: old_session_id=%s does not match bound session=%s",
+                old_session_id,
+                previous_session_id,
+            )
+            self._reset_session_scoped_runtime_state()
+            self._apply_session_start_metadata(session_id, kwargs)
+            self._bind_lifecycle_state(
+                session_id,
+                conversation_id=kwargs.get("conversation_id"),
+            )
+            self._log_session_filter_diagnostics()
+            return
+
+        self._apply_session_start_metadata(session_id, kwargs)
+        self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
+        if frontier > 0:
+            state = self._lifecycle.advance_frontier(
+                self._conversation_id,
+                session_id,
+                frontier,
+            )
+            if state is not None:
+                self._last_compacted_store_id = state.current_frontier_store_id
+        self._log_session_filter_diagnostics()
+
+    def on_session_start(self, session_id: str, **kwargs) -> None:
+        boundary_reason = str(kwargs.get("boundary_reason") or "")
+        old_session_id = str(kwargs.get("old_session_id") or "")
+        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+            self._continue_compression_boundary(session_id, old_session_id, kwargs)
+            return
+
+        previous_session_id = self._session_id
+        if previous_session_id and previous_session_id != session_id:
+            self._reset_session_scoped_runtime_state()
+        else:
+            self._ingest_cursor = 0
+            self._last_compacted_store_id = 0
+            self._last_overflow_recovery_failed = False
+            self._last_condensation_suppressed_reason = ""
+        self._apply_session_start_metadata(session_id, kwargs)
         self._bind_lifecycle_state(
             session_id,
             conversation_id=kwargs.get("conversation_id"),
         )
         self._log_session_filter_diagnostics()
 
-    def _normalize_iteration_summary(self, summary: str | None, messages: List[Dict[str, Any]]) -> str:
-        candidate = (summary or "").strip() if isinstance(summary, str) else ""
-        if not candidate:
-            for msg in reversed(messages):
-                if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                    continue
-                content = msg.get("content")
-                if isinstance(content, str) and content.strip():
-                    candidate = content.strip()
-                    break
-        if not candidate:
-            candidate = "Session finished without a visible assistant response."
-        return candidate
-
-    def _extract_iteration_refs(self, messages: List[Dict[str, Any]]) -> tuple[list[str], list[str]]:
-        failed_tests: list[str] = []
-        artifact_refs: list[str] = []
-        seen_failed: set[str] = set()
-        seen_artifacts: set[str] = set()
-
-        failed_test_patterns = (
-            re.compile(r"(?m)^(?:FAILED|ERROR)\s+([A-Za-z0-9_./:-]+::[A-Za-z0-9_./:-]+)"),
-            re.compile(r"(?m)\b([A-Za-z0-9_./-]+::[A-Za-z0-9_./:-]+)\b"),
-        )
-        artifact_patterns = (
-            re.compile(r"MEDIA:([^\s)]+)"),
-            re.compile(r"(?i)\bartifact(?:_refs?|_ref)?[:=]\s*([^\s,;]+)"),
-        )
-
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content")
-            if not isinstance(content, str) or not content:
-                continue
-            for pattern in failed_test_patterns:
-                for match in pattern.findall(content):
-                    ref = match.strip().rstrip(".,)")
-                    if ref and ref not in seen_failed:
-                        seen_failed.add(ref)
-                        failed_tests.append(ref)
-            for pattern in artifact_patterns:
-                for match in pattern.findall(content):
-                    ref = match.strip().rstrip(".,)")
-                    if ref and ref not in seen_artifacts:
-                        seen_artifacts.add(ref)
-                        artifact_refs.append(ref)
-
-        return failed_tests, artifact_refs
-
-    def _build_iteration_signals(
-        self,
-        *,
-        status: str,
-        completed: bool,
-        interrupted: bool,
-        api_call_count: int,
-        turn_exit_reason: str,
-    ) -> list[str]:
-        signals = [f"engine:{self.name}", f"api_calls:{api_call_count}"]
-        if completed:
-            signals.append("completed")
-        elif interrupted:
-            signals.append("interrupted")
-        else:
-            signals.append("partial")
-        if self.compression_count:
-            signals.append(f"compressions:{self.compression_count}")
-        if turn_exit_reason:
-            signals.append(f"exit:{turn_exit_reason}")
-        signals.append(f"status:{status}")
-        return signals
-
-    def _merge_unique_refs(self, *groups: list[str]) -> list[str]:
-        merged: list[str] = []
-        seen: set[str] = set()
-        for group in groups:
-            for ref in group:
-                if ref and ref not in seen:
-                    seen.add(ref)
-                    merged.append(ref)
-        return merged
-
-    def _detect_git_commit(self, project_root: str | None) -> str | None:
-        if not project_root:
-            return None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except Exception:
-            return None
-        commit = result.stdout.strip()
-        return commit or None
-
-    def _infer_iteration_status(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        completed: bool | None,
-        interrupted: bool | None,
-        turn_exit_reason: str,
-    ) -> str:
-        if interrupted:
-            return "failure"
-        if completed is False:
-            return "partial"
-
-        text_blob = "\n".join(
-            msg.get("content", "")
-            for msg in messages
-            if isinstance(msg, dict) and isinstance(msg.get("content"), str)
-        ).lower()
-        if any(marker in text_blob for marker in ("traceback", "exception", "error", "failed", "fatal")):
-            return "failure"
-        if turn_exit_reason in {"compression", "rollover"}:
-            return "partial"
-        return "success" if any(
-            isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), str) and msg.get("content").strip()
-            for msg in messages
-        ) else "partial"
-
-    def _build_iteration_record(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-        **kwargs,
-    ) -> IterationRecord | None:
-        if not session_id or self._session_ignored or self._session_stateless:
-            return None
-        if self._last_iteration_record_session_id == session_id:
-            return None
-
-        completed = kwargs.get("completed")
-        interrupted = kwargs.get("interrupted")
-        turn_exit_reason = str(kwargs.get("turn_exit_reason") or "")
-        api_call_count = int(kwargs.get("api_call_count", self._api_call_count))
-        status = str(kwargs.get("status") or "").strip().lower()
-        if status not in {"success", "failure", "partial"}:
-            status = self._infer_iteration_status(
-                messages,
-                completed=completed if isinstance(completed, bool) else None,
-                interrupted=interrupted if isinstance(interrupted, bool) else None,
-                turn_exit_reason=turn_exit_reason,
-            )
-
-        project_root = str(kwargs.get("project_root") or os.getcwd())
-        summary = self._normalize_iteration_summary(kwargs.get("summary"), messages)
-        message_failed_tests, message_artifacts = self._extract_iteration_refs(messages)
-        failed_tests = self._merge_unique_refs(
-            [ref.strip() for ref in (kwargs.get("failed_tests") or []) if isinstance(ref, str)],
-            message_failed_tests,
-        )
-        artifact_refs = self._merge_unique_refs(
-            [ref.strip() for ref in (kwargs.get("artifact_refs") or []) if isinstance(ref, str)],
-            message_artifacts,
-        )
-        lesson = kwargs.get("lesson")
-        next_action = kwargs.get("next_action")
-        git_commit = kwargs.get("git_commit") or self._detect_git_commit(project_root)
-
-        signals = self._build_iteration_signals(
-            status=status,
-            completed=bool(completed) if isinstance(completed, bool) else (status == "success"),
-            interrupted=bool(interrupted) if isinstance(interrupted, bool) else (status == "failure"),
-            api_call_count=api_call_count,
-            turn_exit_reason=turn_exit_reason,
-        )
-        if failed_tests:
-            signals.append(f"failed_tests:{len(failed_tests)}")
-        if artifact_refs:
-            signals.append(f"artifacts:{len(artifact_refs)}")
-        if git_commit:
-            signals.append(f"git:{git_commit[:8]}")
-
-        return IterationRecord(
-            session_id=session_id,
-            project_root=project_root,
-            status=status,
-            signals=signals,
-            summary=summary,
-            git_commit=git_commit,
-            failed_tests=failed_tests,
-            lesson=lesson,
-            next_action=next_action,
-            artifact_refs=artifact_refs,
-        )
-
-    def on_session_end(self, session_id: str, messages: List[Dict[str, Any]], **kwargs) -> None:
+    def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         # Ensure all messages are persisted
         self._ingest_messages(messages)
         self._lifecycle.finalize_session(
@@ -765,70 +667,6 @@ class LCMEngine(ContextEngine):
             session_id,
             frontier_store_id=self._last_compacted_store_id,
         )
-
-        record = None
-        try:
-            record = self._build_iteration_record(session_id, messages, **kwargs)
-        except Exception as exc:
-            logger.warning("LCM iteration record build failed for session %s: %s", session_id, exc)
-
-        if record is None:
-            return
-
-        try:
-            recent_records = self._store.get_recent_iteration_records(
-                limit=int(kwargs.get("lesson_lookback", 20)),
-                project_root=record.project_root,
-            )
-            lessons = distill_lessons([*recent_records, record])
-            selected = select_lesson_for_record(record, lessons)
-            if selected is not None:
-                record.lesson = selected.lesson
-                if not record.next_action:
-                    record.next_action = selected.recommended_next_action
-        except Exception as exc:
-            logger.debug("LCM lesson distillation skipped for session %s: %s", session_id, exc)
-
-        try:
-            self._store.append_iteration_record(record)
-            self._last_iteration_record_session_id = session_id
-        except Exception as exc:
-            logger.warning("LCM iteration record persist failed for session %s: %s", session_id, exc)
-            return
-
-        if self._config.evolver_schedule_enabled and record.status == "failure" and str(kwargs.get("turn_exit_reason") or "").strip().lower() == "shutdown":
-            try:
-                schedule_evolver_review_job(
-                    project_root=record.project_root,
-                    schedule=self._config.evolver_followup_delay,
-                    evidence_path=kwargs.get("evidence_dir") or kwargs.get("run_bundle_path") or kwargs.get("evidence_path") or record.project_root,
-                    session_id=session_id,
-                    job_name=f"Evolver review {session_id}",
-                    deliver=self._config.evolver_schedule_deliver,
-                    repeat=1,
-                )
-            except Exception as exc:
-                logger.warning("LCM evolver review scheduling failed for session %s: %s", session_id, exc)
-
-        if self._config.evolver_enabled and str(kwargs.get("turn_exit_reason") or "").strip().lower() == "shutdown":
-            evidence_path = (
-                kwargs.get("evidence_dir")
-                or kwargs.get("run_bundle_path")
-                or kwargs.get("evidence_path")
-                or kwargs.get("project_root")
-                or self._hermes_home
-                or record.project_root
-            )
-            try:
-                review_iteration_bundle(
-                    evidence_path,
-                    enabled=True,
-                    configured_path=self._config.evolver_path,
-                    args=self._config.evolver_args,
-                    timeout_ms=self._config.evolver_timeout_ms,
-                )
-            except Exception as exc:
-                logger.warning("LCM Evolver bridge failed for session %s: %s", session_id, exc)
 
     def on_session_reset(self) -> None:
         super().on_session_reset()
@@ -946,6 +784,14 @@ class LCMEngine(ContextEngine):
 
     def get_status(self) -> Dict[str, Any]:
         status = super().get_status()
+        status.update({
+            "compression_count": self.compression_count,
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "last_completion_tokens": self.last_completion_tokens,
+            "last_total_tokens": self.last_total_tokens,
+            "context_length": self.context_length,
+            "threshold_tokens": self.threshold_tokens,
+        })
         lifecycle_state = self._lifecycle.get_by_conversation(self._conversation_id)
         status["engine"] = "lcm"
         try:

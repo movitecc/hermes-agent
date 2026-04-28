@@ -9,12 +9,6 @@ Based on the LCM paper by Ehrlich & Blackman (Voltropy PBC, Feb 2026).
 import logging
 import os
 
-from .config import LCMConfig
-from .engine import LCMEngine
-from .iteration_schema import IterationRecord
-from .lesson_distiller import DistilledLesson, distill_lessons, select_lesson_for_record
-from .evolver_bridge import resolve_evolver_binary, review_iteration_bundle, build_scheduled_review_prompt, schedule_evolver_review_job
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,15 +21,18 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
 
 def register(ctx):
     """Plugin entry point — register the LCM context engine."""
+    from .config import LCMConfig
+    from .engine import LCMEngine
+
     config = LCMConfig.from_env()
 
     # Resolve hermes_home for profile-scoped storage
     hermes_home = ""
     try:
         from hermes_cli.config import get_hermes_home
-
         hermes_home = str(get_hermes_home())
     except Exception:
+        import os
         hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
@@ -59,6 +56,3 @@ def register(ctx):
         logger.info("LCM slash command registration unavailable on this Hermes host; continuing without /lcm")
 
     logger.info("LCM plugin loaded — lossless context management active")
-
-
-__all__ = ["LCMConfig", "LCMEngine", "IterationRecord", "DistilledLesson", "distill_lessons", "select_lesson_for_record", "resolve_evolver_binary", "review_iteration_bundle", "build_scheduled_review_prompt", "schedule_evolver_review_job", "register"]

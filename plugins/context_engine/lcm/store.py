@@ -20,7 +20,6 @@ from .db_bootstrap import (
     ensure_external_content_fts,
     run_versioned_migrations,
 )
-from .iteration_schema import IterationRecord
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -304,97 +303,16 @@ class MessageStore:
                 ids.append(cur.lastrowid)
         return ids
 
-    def append_iteration_record(self, record: IterationRecord) -> int:
-        """Persist a normalized session-end iteration record."""
-        payload = record.to_dict()
+    def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
+        """Move all persisted messages from one session_id to another."""
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return 0
         cur = self._conn.execute(
-            """INSERT INTO lcm_iteration_records (
-                session_id, project_root, status, signals, summary, git_commit,
-                failed_tests, lesson, next_action, artifact_refs, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                payload["session_id"],
-                payload["project_root"],
-                payload["status"],
-                json.dumps(payload["signals"], ensure_ascii=False),
-                payload["summary"],
-                payload["git_commit"],
-                json.dumps(payload["failed_tests"], ensure_ascii=False),
-                payload["lesson"],
-                payload["next_action"],
-                json.dumps(payload["artifact_refs"], ensure_ascii=False),
-                payload["created_at"],
-            ),
+            "UPDATE messages SET session_id = ? WHERE session_id = ?",
+            (new_session_id, old_session_id),
         )
         self._conn.commit()
-        return cur.lastrowid
-
-    def get_latest_iteration_record(self, session_id: str) -> IterationRecord | None:
-        row = self._conn.execute(
-            """
-            SELECT session_id, project_root, status, signals, summary, git_commit,
-                   failed_tests, lesson, next_action, artifact_refs, created_at
-            FROM lcm_iteration_records
-            WHERE session_id = ?
-            ORDER BY record_id DESC
-            LIMIT 1
-            """,
-            (session_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return IterationRecord.from_dict({
-            "session_id": row[0],
-            "project_root": row[1],
-            "status": row[2],
-            "signals": json.loads(row[3] or "[]"),
-            "summary": row[4],
-            "git_commit": row[5],
-            "failed_tests": json.loads(row[6] or "[]"),
-            "lesson": row[7],
-            "next_action": row[8],
-            "artifact_refs": json.loads(row[9] or "[]"),
-            "created_at": row[10],
-        })
-
-    def get_recent_iteration_records(
-        self,
-        limit: int = 20,
-        project_root: str | None = None,
-    ) -> list[IterationRecord]:
-        where = ""
-        params: list[Any] = []
-        if project_root:
-            where = "WHERE project_root = ?"
-            params.append(project_root)
-        query = f"""
-            SELECT session_id, project_root, status, signals, summary, git_commit,
-                   failed_tests, lesson, next_action, artifact_refs, created_at
-            FROM lcm_iteration_records
-            {where}
-            ORDER BY record_id DESC
-            LIMIT ?
-        """
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
-        records = [
-            IterationRecord.from_dict({
-                "session_id": row[0],
-                "project_root": row[1],
-                "status": row[2],
-                "signals": json.loads(row[3] or "[]"),
-                "summary": row[4],
-                "git_commit": row[5],
-                "failed_tests": json.loads(row[6] or "[]"),
-                "lesson": row[7],
-                "next_action": row[8],
-                "artifact_refs": json.loads(row[9] or "[]"),
-                "created_at": row[10],
-            })
-            for row in rows
-        ]
-        return list(reversed(records))
-
+        return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
