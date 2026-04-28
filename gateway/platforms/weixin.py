@@ -1504,7 +1504,7 @@ class WeixinAdapter(BasePlatformAdapter):
                 # If a prior attempt corrupted the session (e.g. aiohttp
                 # closed its timeout context manager after a failed POST),
                 # rebuild the session before retrying.
-                if attempt > 0 and self._send_session and self._send_session.closed:
+                if attempt > 0 and self._send_session and getattr(self._send_session, "closed", False):
                     self._send_session = aiohttp.ClientSession(
                         trust_env=True, connector=_make_ssl_connector(),
                     )
