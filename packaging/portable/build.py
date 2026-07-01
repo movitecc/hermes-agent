@@ -241,7 +241,7 @@ set HERMES_PORTABLE=1
 set HERMES_HOME=%ROOT_DIR%\data\hermes-home
 set HERMES_OPTIONAL_SKILLS=%ROOT_DIR%\app\hermes-agent\optional-skills
 set HERMES_OPTIONAL_MCPS=%ROOT_DIR%\app\hermes-agent\optional-mcps
-set PYTHONPATH=%ROOT_DIR%\app\site;%ROOT_DIR%\app\hermes-agent;%PYTHONPATH%
+if "%PYTHONPATH%"=="" (set "PYTHONPATH=%ROOT_DIR%\app\site;%ROOT_DIR%\app\hermes-agent") else (set "PYTHONPATH=%ROOT_DIR%\app\site;%ROOT_DIR%\app\hermes-agent;%PYTHONPATH%")
 set PATH=%ROOT_DIR%\runtime\bin;%ROOT_DIR%\runtime\node;%ROOT_DIR%\runtime\python;%ROOT_DIR%\runtime\python\Scripts;%PATH%
 if not exist "%HERMES_HOME%" mkdir "%HERMES_HOME%"
 set "PYTHON=%ROOT_DIR%\runtime\python\python.exe"
