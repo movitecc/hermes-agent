@@ -334,6 +334,16 @@ def build_portable_bundle(config: PortableConfig, runner: Runner = run_command) 
     if not (source_root / "pyproject.toml").exists():
         raise FileNotFoundError(f"source root does not look like Hermes Agent: {source_root}")
 
+    if config.python_runtime is None:
+        is_host_windows = sys.platform == "win32"
+        is_target_windows = config.target.startswith("windows")
+        if is_host_windows != is_target_windows:
+            raise ValueError(
+                f"Cannot download a managed Python runtime for target {config.target} "
+                f"on host platform {sys.platform}. Please provide a pre-built Python runtime "
+                f"via --python-runtime."
+            )
+
     bundle_dir = config.output_dir / bundle_name(config)
     if bundle_dir.exists():
         if not config.force:
