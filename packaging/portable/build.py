@@ -406,13 +406,17 @@ def parse_args(argv: Iterable[str] | None = None) -> PortableConfig:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    config = parse_args(argv)
-    result = build_portable_bundle(config)
-    print(f"Portable bundle: {result.bundle_dir}")
-    print(f"Python: {result.python_executable}")
-    if result.archive_path:
-        print(f"Archive: {result.archive_path}")
-    return 0
+    try:
+        config = parse_args(argv)
+        result = build_portable_bundle(config)
+        print(f"Portable bundle: {result.bundle_dir}")
+        print(f"Python: {result.python_executable}")
+        if result.archive_path:
+            print(f"Archive: {result.archive_path}")
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
