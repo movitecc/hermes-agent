@@ -203,6 +203,7 @@ def install_portable_site(config: PortableConfig, bundle_dir: Path, python_exe: 
             str(source_dir),
         ]
     )
+    shutil.rmtree(build_dir, ignore_errors=True)
 
 
 def write_launchers(bundle_dir: Path, target: str) -> None:
