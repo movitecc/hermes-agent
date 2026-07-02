@@ -54,3 +54,46 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/portable/${{ matrix.artifact }}
           if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: portable
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Hermes Portable ${{ github.ref_name }}"
+          body: |
+            ## Hermes Portable ${{ github.ref_name }}
+
+            Self-contained portable bundles — no Python or uv installation required.
+            Unpack and run.
+
+            ### Linux x64
+            ```bash
+            tar xzf HermesPortable-linux-x64.tar.gz
+            ./HermesPortable-linux-x64/hermes --help
+            ```
+
+            ### Windows x64
+            ```powershell
+            Expand-Archive HermesPortable-windows-x64.zip
+            .\HermesPortable-windows-x64\hermes.ps1 --help
+            ```
+
+            First run: `hermes setup` to add your API keys.
+            State lives under `data/hermes-home/` inside the portable directory.
+          files: |
+            dist/release/**/*.tar.gz
+            dist/release/**/*.zip
+          draft: false
+          prerelease: true
