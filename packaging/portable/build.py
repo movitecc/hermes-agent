@@ -126,8 +126,20 @@ def find_python_executable(runtime_dir: Path, target: str) -> Path:
     for candidate in preferred:
         if candidate.exists():
             return candidate
+    # uv-managed Python on Windows nests inside a versioned subdirectory
+    # (e.g. cpython-3.12-windows-x86_64-none).  Try one level deep first
+    # so we don't pick up venv template stubs inside Lib/.
     for name in names:
-        matches = sorted(runtime_dir.rglob(name))
+        shallow_matches = sorted(
+            (d / name for d in runtime_dir.iterdir() if d.is_dir() and (d / name).exists()),
+            key=lambda p: str(p),
+        )
+        if shallow_matches:
+            return shallow_matches[0]
+    # Last resort: deep recursive search, shortest-path first to avoid
+    # Lib/venv/scripts/nt/python.exe beating the real root python.exe.
+    for name in names:
+        matches = sorted(runtime_dir.rglob(name), key=lambda p: (len(p.parts), str(p)))
         if matches:
             return matches[0]
     raise FileNotFoundError(f"could not find a Python executable under {runtime_dir}")
