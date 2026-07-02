@@ -1,0 +1,56 @@
+name: Build portable bundles
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  portable:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            artifact: HermesPortable-linux-x64.tar.gz
+          - os: windows-latest
+            target: windows-x64
+            artifact: HermesPortable-windows-x64.zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build portable bundle
+        shell: bash
+        run: |
+          uv run --extra dev python packaging/portable/build.py --target "${{ matrix.target }}"
+
+      - name: Smoke test launcher help
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          dist/portable/HermesPortable-linux-x64/hermes --help >/tmp/hermes-portable-help.txt
+          head -20 /tmp/hermes-portable-help.txt
+
+      - name: Smoke test launcher help
+        if: matrix.target == 'windows-x64'
+        shell: pwsh
+        run: |
+          & dist/portable/HermesPortable-windows-x64/hermes.ps1 --help | Select-Object -First 20
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/portable/${{ matrix.artifact }}
+          if-no-files-found: error
