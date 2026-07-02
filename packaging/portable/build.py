@@ -281,7 +281,7 @@ $env:HERMES_PORTABLE = "1"
 $env:HERMES_HOME = Join-Path $Root "data\hermes-home"
 $env:HERMES_OPTIONAL_SKILLS = Join-Path $Root "app\hermes-agent\optional-skills"
 $env:HERMES_OPTIONAL_MCPS = Join-Path $Root "app\hermes-agent\optional-mcps"
-$env:PYTHONPATH = (Join-Path $Root "app\site") + ";" + (Join-Path $Root "app\hermes-agent") + (if ($env:PYTHONPATH) { ";" + $env:PYTHONPATH } else { "" })
+$env:PYTHONPATH = (Join-Path $Root "app\site") + ";" + (Join-Path $Root "app\hermes-agent") + $(if ($env:PYTHONPATH) { ";" + $env:PYTHONPATH } else { "" })
 $env:PATH = (Join-Path $Root "runtime\bin") + ";" + (Join-Path $Root "runtime\node") + ";" + (Join-Path $Root "runtime\python") + ";" + (Join-Path $Root "runtime\python\Scripts") + ";" + $env:PATH
 New-Item -ItemType Directory -Force -Path $env:HERMES_HOME | Out-Null
 $Python = Join-Path $Root "runtime\python\python.exe"
