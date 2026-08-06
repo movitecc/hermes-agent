@@ -108,8 +108,8 @@ def test_dependency_install_uses_locked_export_and_target_site(tmp_path: Path) -
 
     joined = [" ".join(cmd) for cmd in commands]
     assert any("uv export --locked --no-dev --no-emit-project --extra all" in item for item in joined)
-    assert any("uv pip install" in item and "--require-hashes" in item and "--target" in item for item in joined)
-    assert any("uv pip install" in item and "--no-deps" in item for item in joined)
+    assert any("uv pip install" in item and "--target" in item and "--require-hashes" not in item for item in joined)
+    assert not any("--no-deps" in item for item in joined)
 
 
 def test_windows_launcher_uses_bundled_python_and_portable_home(tmp_path: Path) -> None:

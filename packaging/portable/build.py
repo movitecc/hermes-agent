@@ -197,24 +197,13 @@ def install_portable_site(config: PortableConfig, bundle_dir: Path, python_exe: 
             str(python_exe),
             "--target",
             str(site_dir),
-            "--require-hashes",
             "-r",
             str(requirements),
         ]
     )
-    runner(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(python_exe),
-            "--target",
-            str(site_dir),
-            "--no-deps",
-            str(source_dir),
-        ]
-    )
+    # The source tree is placed on PYTHONPATH by every portable launcher.
+    # Do not install it as a wheel: current Hermes intentionally rejects
+    # wheel/sdist builds and the launcher does not need package metadata.
     shutil.rmtree(build_dir, ignore_errors=True)
 
 
