@@ -120,13 +120,17 @@ function setActivityToasts(enabled) {
 }
 
 /** Detect new inbound activity from a fresh roster: last_active moved past
- *  the watermark for a bot whose chat isn't on screen -> unread + toast. */
+ *  the watermark for a bot whose chat isn't on screen -> unread + toast.
+ *  Watermarks follow botActivitySession (canonical Bot Chat included) —
+ *  last_session alone never sees the hidden Bot Chat, so DMs delivered
+ *  there would neither badge nor toast. */
 function trackInboundActivity(roster) {
   const seeding = !watermarksSeeded
   watermarksSeeded = true
 
   for (const bot of roster) {
-    const ts = bot.last_session?.last_active || 0
+    const activity = botActivitySession(bot)
+    const ts = activity?.last_active || 0
     const prev = rosterWatermarks.get(bot.name) || 0
     rosterWatermarks.set(bot.name, Math.max(prev, ts))
 
@@ -153,7 +157,7 @@ function trackInboundActivity(roster) {
     if ($activityToasts.get()) {
       const meta = $botMeta.get()[bot.name]
       const label = displayName(bot, meta)
-      const preview = (bot.last_session?.preview || '').trim()
+      const preview = (activity?.preview || '').trim()
       const inbound = /^Message from/i.test(preview)
 
       host.notify({
@@ -3272,12 +3276,19 @@ async function openStoredBotChat(name, storedId, summary) {
     typeof summary?.message_count === 'number' && Number.isFinite(summary.message_count)
   const expectHistory = hasAuthoritativeCount ? summary.message_count > 0 : true
 
+  // A profile backend that just woke up can lose the hydration-timeout race
+  // even though the session is fine (hermes-agent#89617) — clicking Retry
+  // succeeds because the backend is warm by then. retryHydrationTimeoutOnce
+  // asks the SDK layer to retry that same wait internally, BEFORE it arms the
+  // core stranded-session overlay: a plugin-side retry can't do this because
+  // only host.openSession sees the resume-exhausted latch that overlay reads.
   await host.openSession(storedId, {
     profile: name,
     intent: 'main',
     awaitHydration: true,
     expectHistory,
-    keepAllProfilesScope: false
+    keepAllProfilesScope: true,
+    retryHydrationTimeoutOnce: true
   })
 
   return storedId
@@ -3317,7 +3328,7 @@ function createCanonicalChat(name) {
 
     if (sid && typeof host.openSession === 'function') {
       try {
-        await host.openSession(sid, { profile: name, intent: 'main', keepAllProfilesScope: false })
+        await host.openSession(sid, { profile: name, intent: 'main', keepAllProfilesScope: true })
         opened = true
       } catch {
         // The stored row may not exist until the kickoff persists it. Retry
@@ -3332,7 +3343,7 @@ function createCanonicalChat(name) {
         await host.request('prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
 
         if (!opened && sid && typeof host.openSession === 'function') {
-          await host.openSession(sid, { profile: name, intent: 'main', keepAllProfilesScope: false })
+          await host.openSession(sid, { profile: name, intent: 'main', keepAllProfilesScope: true })
         }
       } catch {
         // The chat already exists. Keep the pin so the next click
@@ -4762,6 +4773,28 @@ function generatedSessionTitle(session, preview) {
  *  seconds is treated as "active now" (pulsing dot in its row). */
 const ACTIVE_WINDOW_S = 90
 
+/** The session whose activity best represents this bot — the FRESHER of the
+ *  pinned canonical Bot Chat (preferred_session) and the profile's newest
+ *  visible conversation (last_session).
+ *
+ *  Canonical Bot Chats are hidden from the session list by design, so
+ *  last_session alone never sees them: a bot you talk to all day through its
+ *  Bot Chat reads "6d ago" because its newest VISIBLE session is a week old.
+ *  #88690 moved the preview text to preferred_session but left every activity
+ *  signal (age label, pulse dot, unread watermark, recency sort) on
+ *  last_session. All of them key off this helper now. Older gateways without
+ *  the preferred_session resolver degrade to last_session unchanged. */
+function botActivitySession(bot) {
+  const preferred = bot?.preferred_session
+  const last = bot?.last_session
+
+  if (!preferred || !last) {
+    return preferred || last || null
+  }
+
+  return (preferred.last_active || 0) >= (last.last_active || 0) ? preferred : last
+}
+
 /** Bots that are working right now: the profile the gateway is running a
  *  turn for (busy), plus any bot whose last message landed inside the
  *  liveness window. Pure — output follows the input roster's order, so
@@ -4769,7 +4802,7 @@ const ACTIVE_WINDOW_S = 90
 function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
   return (roster || []).filter(bot => {
     const busyTurn = !bot.remoteSource && bot.name === activeProfile && gatewayState === 'busy'
-    const last = bot.last_session?.last_active || 0
+    const last = botActivitySession(bot)?.last_active || 0
     const inWindow = Boolean(last && now / 1000 - last < ACTIVE_WINDOW_S)
 
     return busyTurn || inWindow
@@ -4797,7 +4830,17 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
   const photo = Boolean(image && !isBackfilledFacePng(image))
   const gatewayState = useValue(host.state.gateway)
-  const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
+  // Preview identity must match click identity (#88200): when the backend
+  // resolved the pinned canonical chat, preview THAT session — not the
+  // profile's most recent (but unrelated) activity. Activity signals
+  // (age label, pulse dot) follow the same rule via botActivitySession:
+  // the canonical Bot Chat is hidden from last_session, so keying age off
+  // last_session alone shows "6d ago" on a bot you just messaged.
+  const previewSession = bot.preferred_session || last
+  const activitySession = botActivitySession(bot)
+  const activeNow = Boolean(
+    activitySession?.last_active && Date.now() / 1000 - activitySession.last_active < ACTIVE_WINDOW_S
+  )
   // Work pose only when this bot is actually doing something: the active
   // profile while the gateway is busy, or a bot that wrote within the
   // liveness window. Not every bot whenever the gateway is busy.
@@ -4808,11 +4851,6 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   const unread = !bot.remoteSource && Boolean(unreadByName[bot.name])
   // WHO sent the last message (bot-to-bot DM vs human) — the full stored
   // history lives in the Sessions workspace (context menu), not inline.
-  // Preview identity must match click identity (#88200): when the backend
-  // resolved the pinned canonical chat, preview THAT session — not the
-  // profile's most recent (but unrelated) activity. Liveness checks above
-  // keep last_session semantics: any recent activity means the bot is alive.
-  const previewSession = bot.preferred_session || last
   const { fromBot } = previewKind(previewSession?.preview)
   // DM previews read like DMs: strip the delivery prefix, keep the message.
   const displayPreview = stripPreviewMarkdown(
@@ -4983,10 +5021,10 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
                     title: 'Active in the last 90s'
                   })
                 : null,
-              last
+              activitySession
                 ? jsx('span', {
                     className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
-                    children: relativeTime(last.last_active * 1000)
+                    children: relativeTime(activitySession.last_active * 1000)
                   })
                 : null
             ]
@@ -6158,7 +6196,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
     host
       .connections()
-      .then(value => setConnections(Array.isArray(value) ? value : []))
+      // host.connections() returns the registry ROWS on current SDKs, but the
+      // envelope object ({version, primary, connections: [...]}) on desktops
+      // that predate the SDK-side unwrap — accept both shapes.
+      .then(value => setConnections(Array.isArray(value) ? value : Array.isArray(value?.connections) ? value.connections : []))
       .catch(() => setConnections([]))
   }, [open, connections])
 
@@ -7811,7 +7852,7 @@ async function openProfileSession(botName, session, gatewayGeneration) {
     typeof session?.message_count === 'number' && Number.isFinite(session.message_count)
   const expectHistory = hasAuthoritativeCount ? session.message_count > 0 : Boolean(session?.preview)
 
-  await host.openSession(id, { profile, awaitHydration: true, expectHistory, keepAllProfilesScope: false })
+  await host.openSession(id, { profile, awaitHydration: true, expectHistory, keepAllProfilesScope: true })
   if (gatewayGeneration !== $sessionsGatewayGeneration.get()) return
   $botSelectedSessions.set({ ...$botSelectedSessions.get(), [profile]: id })
 }
@@ -9541,7 +9582,7 @@ function BotsPane() {
   // No special slot for the primary bot — it competes on recency too.
   const activityOf = bot => {
     const created = botRosterMeta(bot, allMeta)?.created || bot.ui_meta?.['hermes-bots']?.created || 0
-    const lastMsg = (bot.last_session?.last_active || 0) * 1000
+    const lastMsg = (botActivitySession(bot)?.last_active || 0) * 1000
 
     return Math.max(created, lastMsg)
   }
