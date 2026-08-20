@@ -29,12 +29,13 @@ jobs:
           set -euo pipefail
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch --no-tags upstream main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "UPSTREAM_CHANGED=false" >> "$GITHUB_ENV"
             exit 0
           fi
           branch="automation/sync-upstream-$(date -u +%Y%m%d%H%M%S)"
-          git switch -c "$branch"
           git merge --no-edit upstream/main
           echo "UPSTREAM_CHANGED=true" >> "$GITHUB_ENV"
           echo "SYNC_BRANCH=$branch" >> "$GITHUB_ENV"
