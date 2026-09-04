@@ -94,8 +94,12 @@ model_router:
     half_open_successes: 2
   stream_failover: {enabled: true, max_alternates: 1}
   planning_delegate:
-    enabled: false             # opt-in decision metadata; dispatch remains fail-closed
+    enabled: false             # opt-in async decision metadata
     compressed_context: {max_messages: 12, max_tokens: 16384}
+  feedback:
+    enabled: false             # bounded offline score adjustment
+    min_samples: 5
+    max_adjustment: 0.10
   loop_escalation: {threshold: 3}
   session_pin: {enabled: true, dwell_turns: 3, switch_margin: 0.25}
   safe_tier: economical

@@ -38,6 +38,7 @@ from .context_fit import (
 )
 from .envelope import classify_turn_envelope
 from .escalation import evaluate_loop_escalation
+from .feedback import FeedbackConfig, adjust_scores
 from .health import HealthConfig
 from .local_zero import LocalZeroConfig, ping_local_services
 from .low_intensity import DEFAULT_HIGH_THRESHOLD, DEFAULT_LOW_THRESHOLD, score_low_intensity
@@ -86,6 +87,7 @@ class RouterConfig:
     stream_failover_enabled: bool = True
     stream_failover_max_alternates: int = 1
     planning_delegate: PlanningDelegateConfig = field(default_factory=PlanningDelegateConfig)
+    feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
 
 
 def _redact_error(error: BaseException, prompt_text: str) -> str:
@@ -370,6 +372,19 @@ class RouterPipeline:
             },
         }
         mo = hydra.hydra_match(fleet, requirements, request, cfg.frugality)
+        if cfg.feedback.enabled and self._telemetry is not None:
+            feedback_candidates = adjust_scores(
+                mo.candidates, self._telemetry.feedback_stats(), cfg.feedback
+            )
+            selected = next(
+                (candidate for candidate in feedback_candidates if candidate.rejected_reason is None),
+                None,
+            )
+            mo = replace(mo, selected=selected, candidates=feedback_candidates)
+            features_feedback = {"enabled": True, "applied": selected is not None}
+        else:
+            features_feedback = {"enabled": False, "applied": False}
+        features["feedback"] = features_feedback
         candidates = mo.candidates + tuple(
             # Keep eligibility rejections visible beside scored candidates.
             # Multi-objective candidates already include unhealthy/capability rejects.
@@ -787,6 +802,7 @@ def router_config_from_dict(cfg: dict) -> RouterConfig:
     health = cfg.get("health") or {}
     stream_failover = cfg.get("stream_failover") or {}
     planning = cfg.get("planning_delegate") or {}
+    feedback = cfg.get("feedback") or {}
     return RouterConfig(
         frugality=FrugalityWeights(
             lambda_cost=float(frugality.get("lambda_cost", 0.5)),
@@ -829,6 +845,11 @@ def router_config_from_dict(cfg: dict) -> RouterConfig:
             # Runtime availability is established by the existing delegation
             # rail; config alone must never enable dispatch.
             available=False,
+        ),
+        feedback=FeedbackConfig(
+            enabled=bool(feedback.get("enabled", False)),
+            min_samples=max(1, min(1000, int(feedback.get("min_samples", 5)))),
+            max_adjustment=max(0.0, min(0.5, float(feedback.get("max_adjustment", 0.1)))),
         ),
     )
 

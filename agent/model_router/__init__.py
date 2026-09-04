@@ -45,6 +45,7 @@ from .health import (
     bind_agent_health,
     classify_health_outcome,
 )
+from .feedback import FeedbackConfig, adjust_scores
 from .hydra import OnnxEmbeddingBackend
 from .pipeline import (
     MODE_AUTO,
@@ -86,6 +87,8 @@ __all__ = [
     "bind_agent_health",
     "classify_health_outcome",
     "OnnxEmbeddingBackend",
+    "FeedbackConfig",
+    "adjust_scores",
     "RouterConfig",
     "RouterPipeline",
     "pipeline_from_config",
