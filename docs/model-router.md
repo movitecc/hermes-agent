@@ -37,8 +37,10 @@ The adapted pipeline is sequential with early exit:
 
 Pi-only subsystems are deliberately not copied: hardware/battery probe,
 speculative prewarm, adaptive reasoning effort, workload heat, isotonic
-calibration, price fetching, planning delegate, Gemini history guard, and
-provider stream failover.
+calibration, price fetching, planning delegate, and Gemini history guard.
+Provider/model health, bounded circuit breaking, and retryable alternate-provider
+stream failover are implemented at the Hermes gateway boundary; failover does
+not resume a partially emitted stream at token level.
 
 ## Configuration
 
@@ -77,6 +79,14 @@ model_router:
     lambda_cost: 0.5
     lambda_latency: 0.1
     lambda_verbosity: 0.15
+  context_safety_margin: 0.90
+  output_headroom: {min_output_tokens: 256}
+  health:
+    enabled: true
+    failure_threshold: 3
+    reset_timeout_seconds: 30
+    half_open_successes: 2
+  stream_failover: {enabled: true, max_alternates: 1}
   loop_escalation: {threshold: 3}
   session_pin: {enabled: true, dwell_turns: 3, switch_margin: 0.25}
   safe_tier: economical
