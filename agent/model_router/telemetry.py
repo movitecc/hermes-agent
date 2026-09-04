@@ -41,6 +41,22 @@ CREATE TABLE IF NOT EXISTS routing_history (
 );
 CREATE INDEX IF NOT EXISTS idx_routing_history_ts ON routing_history(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_routing_history_session ON routing_history(session_id, ts DESC);
+CREATE TABLE IF NOT EXISTS router_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL,
+    success INTEGER NOT NULL DEFAULT 0,
+    retryable INTEGER NOT NULL DEFAULT 0,
+    error_category TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    latency_ms REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_router_outcomes_model ON router_outcomes(model_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_router_outcomes_ts ON router_outcomes(ts DESC);
 """
 
 
@@ -137,6 +153,106 @@ class RouterTelemetry:
                 decision.stage,
                 type(exc).__name__,
             )
+
+    def record_outcome(
+        self,
+        *,
+        session_id: str = "",
+        provider: str = "",
+        model_id: str = "",
+        success: bool = False,
+        retryable: bool = False,
+        error_category: str = "",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0,
+        latency_ms=0.0,
+    ) -> None:
+        """Persist bounded, prompt-free outcome data; failures are non-fatal."""
+        if not self._available or not str(model_id or "").strip():
+            return
+        try:
+            import math
+
+            def nonnegative_int(value):
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError, OverflowError):
+                    return 0
+
+            def nonnegative_float(value):
+                try:
+                    number = float(value)
+                    return number if math.isfinite(number) and number >= 0 else 0.0
+                except (TypeError, ValueError, OverflowError):
+                    return 0.0
+
+            allowed_categories = {
+                "timeout", "rate_limit", "server_error", "overloaded",
+                "network", "auth", "billing", "format_error", "unknown",
+            }
+            category = str(error_category or "").strip().lower()
+            if category not in allowed_categories:
+                category = ""
+            with self._lock, self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO router_outcomes "
+                    "(ts, session_id, provider, model_id, success, retryable, "
+                    "error_category, input_tokens, output_tokens, cost_usd, latency_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        time.time(), str(session_id or "")[:200],
+                        str(provider or "")[:100], str(model_id)[:200],
+                        1 if success else 0, 1 if retryable else 0, category,
+                        nonnegative_int(input_tokens), nonnegative_int(output_tokens),
+                        nonnegative_float(cost_usd), nonnegative_float(latency_ms),
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM router_outcomes WHERE id NOT IN "
+                    "(SELECT id FROM router_outcomes ORDER BY id DESC LIMIT ?)",
+                    (MAX_ROWS,),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Model router outcome write failed: db=%s error_type=%s",
+                self._db_path, type(exc).__name__,
+            )
+
+    def feedback_stats(self) -> dict:
+        """Return aggregate outcome data for observation, not auto-retraining."""
+        empty = {"total": 0, "successful": 0, "retryable_failures": 0, "by_model": {}}
+        if not self._available:
+            return empty
+        try:
+            with self._lock, self._connect() as conn:
+                total, successful, retryable = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(success), 0), "
+                    "COALESCE(SUM(CASE WHEN retryable=1 THEN 1 ELSE 0 END), 0) "
+                    "FROM router_outcomes"
+                ).fetchone()
+                rows = conn.execute(
+                    "SELECT model_id, COUNT(*), COALESCE(SUM(success), 0), "
+                    "COALESCE(SUM(retryable), 0), COALESCE(SUM(input_tokens), 0), "
+                    "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0), "
+                    "COALESCE(AVG(latency_ms), 0) FROM router_outcomes GROUP BY model_id"
+                ).fetchall()
+            by_model = {}
+            for model, count, ok, retry_count, input_total, output_total, cost, latency in rows:
+                by_model[model] = {
+                    "total": count, "successful": ok,
+                    "retryable_failures": retry_count,
+                    "success_rate": round(ok / count, 6) if count else 0.0,
+                    "input_tokens": input_total, "output_tokens": output_total,
+                    "cost_usd": round(float(cost), 8),
+                    "latency_ms": round(float(latency), 3),
+                }
+            return {
+                "total": total, "successful": successful,
+                "retryable_failures": retryable, "by_model": by_model,
+            }
+        except Exception:
+            return empty
 
     def history(self, *, limit: int = 20, session_id: str = "") -> list:
         if not self._available:

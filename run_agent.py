@@ -3322,16 +3322,20 @@ class AIAgent:
             }
         )
 
-    def _record_router_health_success(self) -> None:
-        """Notify the gateway's optional router-health adapter of API success."""
+    def _record_router_health_success(self, response: Any = None) -> None:
+        """Notify router health and feedback adapters of API success."""
         callback = getattr(self, "_router_health_callback", None)
         if callback is None:
             return
         try:
+            usage_fn = getattr(self, "_usage_summary_for_api_request_hook", None)
+            usage = (usage_fn(response) if usage_fn is not None else None) or {}
             callback(
                 success=True,
                 provider=self.provider,
                 model=self.model,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
             )
         except Exception:
             pass

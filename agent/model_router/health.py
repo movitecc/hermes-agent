@@ -189,26 +189,55 @@ def classify_health_outcome(
     return HealthOutcome(OUTCOME_IGNORED, False)
 
 
-def bind_agent_health(agent, store: Optional["RouterHealthStore"]) -> None:
-    """Attach a privacy-safe health outcome adapter to a Hermes AIAgent."""
+def bind_agent_health(
+    agent,
+    store: Optional["RouterHealthStore"],
+    telemetry=None,
+) -> None:
+    """Attach privacy-safe health and outcome adapters to a Hermes AIAgent."""
     if agent is None:
         return
     if store is None or not store.available:
-        agent._router_health_callback = None
         agent._router_health_store = None
+    else:
+        agent._router_health_store = store
+    if telemetry is None or not getattr(telemetry, "available", False):
+        agent._router_telemetry = None
+    else:
+        agent._router_telemetry = telemetry
+    if agent._router_health_store is None and agent._router_telemetry is None:
+        agent._router_health_callback = None
         return
-    agent._router_health_store = store
 
     def record(**outcome) -> None:
-        store.record_outcome(
-            str(outcome.get("provider") or ""),
-            str(outcome.get("model") or ""),
-            success=bool(outcome.get("success", False)),
-            status_code=outcome.get("status_code"),
-            retryable=outcome.get("retryable"),
-            reason=outcome.get("reason"),
-            error_type=outcome.get("error_type"),
-        )
+        provider = str(outcome.get("provider") or getattr(agent, "provider", ""))
+        model = str(outcome.get("model") or getattr(agent, "model", ""))
+        if agent._router_health_store is not None:
+            agent._router_health_store.record_outcome(
+                provider,
+                model,
+                success=bool(outcome.get("success", False)),
+                status_code=outcome.get("status_code"),
+                retryable=outcome.get("retryable"),
+                reason=outcome.get("reason"),
+                error_type=outcome.get("error_type"),
+            )
+        if agent._router_telemetry is not None:
+            agent._router_telemetry.record_outcome(
+                session_id=str(
+                    getattr(agent, "gateway_session_key", "")
+                    or getattr(agent, "session_id", "")
+                ),
+                provider=provider,
+                model_id=model,
+                success=bool(outcome.get("success", False)),
+                retryable=bool(outcome.get("retryable", False)),
+                error_category=outcome.get("reason") or "",
+                latency_ms=outcome.get("latency_ms", 0),
+                input_tokens=outcome.get("input_tokens", 0),
+                output_tokens=outcome.get("output_tokens", 0),
+                cost_usd=outcome.get("cost_usd", 0),
+            )
 
     agent._router_health_callback = record
 

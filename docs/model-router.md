@@ -14,6 +14,12 @@ existing `Candidate`/`route_turn` API and adds a staged `RouterPipeline`.
   gateway; failures and stage exceptions fall back safely.
 - No network, credentials, embedding download, or filesystem probe is used by
   default. Local routing is explicitly opt-in.
+- ONNX embeddings are an optional injected backend. The router does not
+  download a model or tokenizer; missing artifacts or runtime errors fall back
+  to deterministic matching.
+- Outcome feedback is privacy-safe and observational: bounded token/cost/
+  latency aggregates are stored locally, but they do not automatically retrain
+  or change routing weights.
 - Telemetry stores no prompt text, only a bounded djb2 hash and prompt length.
 
 ## Pipeline
@@ -87,6 +93,9 @@ model_router:
     reset_timeout_seconds: 30
     half_open_successes: 2
   stream_failover: {enabled: true, max_alternates: 1}
+  planning_delegate:
+    enabled: false             # opt-in decision metadata; dispatch remains fail-closed
+    compressed_context: {max_messages: 12, max_tokens: 16384}
   loop_escalation: {threshold: 3}
   session_pin: {enabled: true, dwell_turns: 3, switch_margin: 0.25}
   safe_tier: economical

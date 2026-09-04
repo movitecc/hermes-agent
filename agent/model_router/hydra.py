@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 from .low_intensity import compute_code_block_ratio
 from .scoring import FrugalityWeights, MultiObjectiveResult, score_multi_objective
@@ -24,6 +25,45 @@ from .types import CandidateScore, ModelProfile, RoutingRequest, TURN_PLANNING, 
 # Hard-gate thresholds: requirements above these demand declared capabilities.
 REASONING_REQUIREMENT_GATE = 0.6
 SHORTFALL_TOLERANCE = 0.25
+
+
+class OnnxEmbeddingBackend:
+    """Optional ONNX sentence-embedding adapter with a fail-closed API.
+
+    ``session`` and ``tokenizer`` are injected so the router does not discover
+    credentials, download artifacts, or import ONNX at startup. The tokenizer
+    must return numpy-compatible ``input_ids`` and ``attention_mask`` arrays.
+    """
+
+    def __init__(self, *, session: Any, tokenizer: Callable[[str], dict]):
+        self._session = session
+        self._tokenizer = tokenizer
+
+    def embed(self, text: str):
+        import numpy as np
+
+        encoded = self._tokenizer(text or "")
+        inputs = {item.name: encoded[item.name] for item in self._session.get_inputs() if item.name in encoded}
+        if not inputs:
+            raise ValueError("ONNX tokenizer produced no model inputs")
+        output = self._session.run(None, inputs)[0]
+        values = np.asarray(output, dtype=np.float32)
+        if values.ndim == 3:
+            mask = np.asarray(encoded.get("attention_mask"), dtype=np.float32)
+            if mask.ndim == 2:
+                values = (values * mask[:, :, None]).sum(axis=1) / np.maximum(mask.sum(axis=1, keepdims=True), 1.0)
+            else:
+                values = values.mean(axis=1)
+        if values.ndim == 2:
+            values = values[0]
+        norm = float(np.linalg.norm(values))
+        return values / norm if norm > 0 else values
+
+    def try_embed(self, text: str) -> Optional[Any]:
+        try:
+            return self.embed(text)
+        except Exception:
+            return None
 
 _CODE_RE = re.compile(
     r"\b(code|coding|debug|traceback|python|javascript|typescript|sql|api|implement|refactor|test|"
@@ -61,8 +101,41 @@ def _clamp01(value: float) -> float:
     return 0.0 if value <= 0 else (1.0 if value >= 1 else value)
 
 
-def build_requirement_vector(request: RoutingRequest, triage_result: TriageResult) -> RequirementVector:
-    """Derive a 3D requirement vector without neural inference."""
+def _semantic_requirement_vector(text: str, backend) -> Optional[RequirementVector]:
+    """Map optional embedding similarity to requirement axes."""
+    try:
+        import math
+
+        query = backend.try_embed(text)
+        if query is None:
+            return None
+        query = list(query)
+        qnorm = math.sqrt(sum(float(x) * float(x) for x in query))
+        if qnorm <= 0:
+            return None
+        axes = ("code", "reason", "tool")
+        values = []
+        for axis in axes:
+            proto = backend.try_embed(axis)
+            if proto is None:
+                return None
+            proto = list(proto)
+            pnorm = math.sqrt(sum(float(x) * float(x) for x in proto))
+            if pnorm <= 0 or len(proto) != len(query):
+                return None
+            similarity = sum(float(a) * float(b) for a, b in zip(query, proto)) / (qnorm * pnorm)
+            values.append(_clamp01(similarity))
+        return RequirementVector(values[1], values[0], values[2])
+    except Exception:
+        return None
+
+
+def build_requirement_vector(
+    request: RoutingRequest,
+    triage_result: TriageResult,
+    embedding_backend=None,
+) -> RequirementVector:
+    """Derive a 3D requirement vector, optionally blending semantic signals."""
     text = request.prompt_text or ""
     turn_type = request.turn_type or "unknown"
 
@@ -82,7 +155,17 @@ def build_requirement_vector(request: RoutingRequest, triage_result: TriageResul
         0.50 * (1.0 if turn_type == TURN_TOOL_RESULT or any(getattr(m, "role", None) == "tool" for m in request.messages or ()) else 0.0)
         + 0.50 * min(cue_hits / 3.0, 1.0)
     )
-    return RequirementVector(reasoning, code_gen, tool_use)
+    deterministic = RequirementVector(reasoning, code_gen, tool_use)
+    if embedding_backend is None:
+        return deterministic
+    semantic = _semantic_requirement_vector(text, embedding_backend)
+    if semantic is None:
+        return deterministic
+    return RequirementVector(
+        reasoning=0.7 * deterministic.reasoning + 0.3 * semantic.reasoning,
+        code_gen=0.7 * deterministic.code_gen + 0.3 * semantic.code_gen,
+        tool_use=0.7 * deterministic.tool_use + 0.3 * semantic.tool_use,
+    )
 
 
 def _capability_scores(profile: ModelProfile):

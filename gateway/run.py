@@ -6395,7 +6395,11 @@ class TurnRunner:
         try:
             from agent.model_router.health import bind_agent_health
 
-            bind_agent_health(agent, turn_route.get("_model_router_health"))
+            bind_agent_health(
+                agent,
+                turn_route.get("_model_router_health"),
+                turn_route.get("_model_router_telemetry"),
+            )
         except Exception:
             agent._router_health_callback = None
             agent._router_health_store = None
@@ -9208,6 +9212,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Internal-only boundary adapter. The health object and
                     # failover entries never enter logs/telemetry/user output.
                     route["_model_router_health"] = staged.health
+                    route["_model_router_telemetry"] = staged._telemetry
                     if mode == "auto":
                         failovers = staged.failover_candidates(
                             routing_request,
@@ -25814,7 +25819,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     from agent.model_router.health import bind_agent_health
 
                     bind_agent_health(
-                        agent, turn_route.get("_model_router_health")
+                        agent,
+                        turn_route.get("_model_router_health"),
+                        turn_route.get("_model_router_telemetry"),
                     )
                 except Exception:
                     agent._router_health_callback = None

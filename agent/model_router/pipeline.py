@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +42,7 @@ from .health import HealthConfig
 from .local_zero import LocalZeroConfig, ping_local_services
 from .low_intensity import DEFAULT_HIGH_THRESHOLD, DEFAULT_LOW_THRESHOLD, score_low_intensity
 from .pinning import FlipFlopGuard, PIN_BREAK_OVERFLOW, evaluate_pin
+from .planning_delegate import PlanningDelegateConfig
 from .safe_default import safe_default
 from .scoring import FrugalityWeights
 from .triage import VERDICT_COMPLEX, VERDICT_TRIVIAL, triage
@@ -84,6 +85,7 @@ class RouterConfig:
     health: HealthConfig = HealthConfig()
     stream_failover_enabled: bool = True
     stream_failover_max_alternates: int = 1
+    planning_delegate: PlanningDelegateConfig = field(default_factory=PlanningDelegateConfig)
 
 
 def _redact_error(error: BaseException, prompt_text: str) -> str:
@@ -104,12 +106,14 @@ class RouterPipeline:
         state=None,
         telemetry=None,
         health=None,
+        hydra_backend=None,
     ):
         self._fleet = tuple(fleet)
         self._config = config
         self._state = state
         self._telemetry = telemetry
         self._health = health
+        self._hydra_backend = hydra_backend
         self._flip_flop = FlipFlopGuard(config.flip_flop_threshold)
 
     @property
@@ -342,7 +346,9 @@ class RouterPipeline:
                 fleet = tier_fleet
 
         triage_result = triage(request.prompt_text)
-        requirements = hydra.build_requirement_vector(request, triage_result)
+        requirements = hydra.build_requirement_vector(
+            request, triage_result, embedding_backend=self._hydra_backend
+        )
         low = score_low_intensity(
             request,
             triage_result,
@@ -615,7 +621,9 @@ class RouterPipeline:
             )
         )
         triage_result = triage(request.prompt_text)
-        requirements = hydra.build_requirement_vector(request, triage_result)
+        requirements = hydra.build_requirement_vector(
+            request, triage_result, embedding_backend=self._hydra_backend
+        )
         scored = hydra.hydra_match(
             fleet, requirements, request, self._config.frugality
         )
@@ -778,6 +786,7 @@ def router_config_from_dict(cfg: dict) -> RouterConfig:
     headroom = cfg.get("output_headroom") or {}
     health = cfg.get("health") or {}
     stream_failover = cfg.get("stream_failover") or {}
+    planning = cfg.get("planning_delegate") or {}
     return RouterConfig(
         frugality=FrugalityWeights(
             lambda_cost=float(frugality.get("lambda_cost", 0.5)),
@@ -814,6 +823,12 @@ def router_config_from_dict(cfg: dict) -> RouterConfig:
         stream_failover_enabled=bool(stream_failover.get("enabled", True)),
         stream_failover_max_alternates=max(
             0, min(8, int(stream_failover.get("max_alternates", 1)))
+        ),
+        planning_delegate=PlanningDelegateConfig(
+            enabled=bool(planning.get("enabled", False)),
+            # Runtime availability is established by the existing delegation
+            # rail; config alone must never enable dispatch.
+            available=False,
         ),
     )
 

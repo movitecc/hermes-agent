@@ -7463,7 +7463,7 @@ def run_conversation(
             # agents and carries no response or prompt content.
             health_success = getattr(agent, "_record_router_health_success", None)
             if health_success is not None:
-                health_success()
+                health_success(response=response)
 
             # ── Agent-as-provider projection ──────────────────────────────
             # A provider that IS an agent ran its own tools inside its own

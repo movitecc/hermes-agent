@@ -45,6 +45,7 @@ from .health import (
     bind_agent_health,
     classify_health_outcome,
 )
+from .hydra import OnnxEmbeddingBackend
 from .pipeline import (
     MODE_AUTO,
     MODE_OFF,
@@ -54,6 +55,14 @@ from .pipeline import (
     pipeline_from_config,
     profile_from_config,
     router_config_from_dict,
+)
+
+from .planning_delegate import (
+    CompressedContextSpec,
+    PlanningDelegateConfig,
+    PlanningDelegatePlan,
+    build_planning_delegate_plan,
+    dispatch_planning_delegate,
 )
 
 __all__ = [
@@ -76,6 +85,7 @@ __all__ = [
     "RouterHealthStore",
     "bind_agent_health",
     "classify_health_outcome",
+    "OnnxEmbeddingBackend",
     "RouterConfig",
     "RouterPipeline",
     "pipeline_from_config",
@@ -88,4 +98,9 @@ __all__ = [
     "MODE_OFF",
     "MODE_SUGGEST",
     "MODE_AUTO",
+    "CompressedContextSpec",
+    "PlanningDelegateConfig",
+    "PlanningDelegatePlan",
+    "build_planning_delegate_plan",
+    "dispatch_planning_delegate",
 ]
